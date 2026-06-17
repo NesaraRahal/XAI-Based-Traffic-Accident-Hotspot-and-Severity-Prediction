@@ -1,0 +1,4 @@
+traffic-accident-research/venv/
+__pycache__/
+*.pyc
+venv/
