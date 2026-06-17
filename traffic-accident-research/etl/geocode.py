@@ -333,6 +333,21 @@ def main() -> None:
 
 	if not locations_to_geocode:
 		LOGGER.info("No new locations to geocode. Location master is already up to date.")
+		accidents = pd.read_csv("data/raw/traffic_accidents_colombo.csv")
+		location_master = pd.read_csv("data/reference/location_master.csv")
+
+		# Standardize the location column first (same logic as the script)
+		accidents["location_standardized"] = accidents["Location"].apply(standardize_location)
+
+		# Then merge
+		enriched = accidents.merge(
+			location_master,
+			left_on="location_standardized",
+			right_on="location_name",
+			how="left"
+		)
+
+		enriched.to_csv("data/processed/accidents_with_coords.csv", index=False)
 		return
 
 	successful_rows = []
@@ -383,6 +398,20 @@ def main() -> None:
 		combined_master = combined_master[LOCATION_MASTER_COLUMNS]
 		save_location_master(combined_master)
 		LOGGER.info("Saved %s total geocoded locations to %s.", len(combined_master), LOCATION_MASTER_PATH)
+		accidents = pd.read_csv("data/raw/traffic_accidents_colombo.csv")
+		location_master = pd.read_csv("data/reference/location_master.csv")
+
+		# Standardize the location column first (same logic as the script)
+		accidents["location_standardized"] = accidents["Location"].apply(standardize_location)
+
+		# Then merge
+		enriched = accidents.merge(
+			location_master,
+			left_on="location_standardized",
+			right_on="location_name",
+			how="left"
+		)
+		enriched.to_csv("data/processed/accidents_with_coords.csv", index=False)
 	else:
 		LOGGER.warning("No locations were successfully geocoded.")
 
