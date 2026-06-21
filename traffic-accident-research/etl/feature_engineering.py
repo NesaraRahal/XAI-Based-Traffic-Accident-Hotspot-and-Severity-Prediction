@@ -75,7 +75,7 @@ def load_source_data() -> pd.DataFrame:
 	Preference order:
 	1. Weather-enriched dataset.
 	2. Geocoded/enriched dataset with coordinates.
-	2. Raw accident dataset.
+	3. Raw accident dataset.
 	"""
 
 	if WEATHER_ENRICHED_DATA_PATH.exists():
@@ -243,6 +243,11 @@ def derive_features(dataframe: pd.DataFrame) -> pd.DataFrame:
 	transformed["Public Holiday Indicator (Derived)"] = holiday_details.apply(lambda item: item[0])
 	transformed["Public Holiday Name (Derived)"] = holiday_details.apply(lambda item: item[1])
 	transformed["Public Holiday Category (Derived)"] = holiday_details.apply(lambda item: item[2])
+
+	# Sort chronologically using the parsed columns (proper datetime objects, not raw strings)
+	transformed = transformed.sort_values(
+		by=["_parsed_date", "_parsed_time"]
+	).reset_index(drop=True)
 
 	transformed.drop(columns=["_parsed_date", "_parsed_time"], inplace=True)
 	return transformed
