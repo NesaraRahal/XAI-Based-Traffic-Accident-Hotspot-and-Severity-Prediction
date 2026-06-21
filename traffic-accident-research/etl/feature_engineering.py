@@ -28,7 +28,8 @@ from dateutil.easter import easter
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-RAW_DATA_PATH = ROOT_DIR / "data" / "raw" / "traffic_accidents_colombo.csv"
+RAW_DATA_PATH = ROOT_DIR / "data" / "raw" / "accidents_colombo_expanded.csv"
+WEATHER_ENRICHED_DATA_PATH = ROOT_DIR / "data" / "processed" / "accidents_with_weather.csv"
 ENRICHED_DATA_PATH = ROOT_DIR / "data" / "processed" / "accidents_with_coords.csv"
 OUTPUT_PATH = ROOT_DIR / "data" / "processed" / "accidents_feature_engineered.csv"
 
@@ -72,13 +73,21 @@ def load_source_data() -> pd.DataFrame:
 	"""Load the best available accident dataset for feature engineering.
 
 	Preference order:
-	1. Geocoded/enriched dataset with coordinates.
+	1. Weather-enriched dataset.
+	2. Geocoded/enriched dataset with coordinates.
 	2. Raw accident dataset.
 	"""
 
-	source_path = ENRICHED_DATA_PATH if ENRICHED_DATA_PATH.exists() else RAW_DATA_PATH
+	if WEATHER_ENRICHED_DATA_PATH.exists():
+		source_path = WEATHER_ENRICHED_DATA_PATH
+	elif ENRICHED_DATA_PATH.exists():
+		source_path = ENRICHED_DATA_PATH
+	else:
+		source_path = RAW_DATA_PATH
 	if not source_path.exists():
-		raise FileNotFoundError(f"No accident dataset found at {ENRICHED_DATA_PATH} or {RAW_DATA_PATH}")
+		raise FileNotFoundError(
+			f"No accident dataset found at {WEATHER_ENRICHED_DATA_PATH}, {ENRICHED_DATA_PATH}, or {RAW_DATA_PATH}"
+		)
 
 	dataframe = pd.read_csv(source_path)
 	if dataframe.empty:
