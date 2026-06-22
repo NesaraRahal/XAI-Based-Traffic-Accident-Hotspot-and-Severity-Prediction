@@ -8,6 +8,7 @@ The script is designed to be incremental:
 - Existing geocoded locations are loaded and skipped.
 - New locations are geocoded and appended to the master table.
 - Failures are tracked separately for later review.
+- At the end, the enriched dataset (accidents + coordinates) is always saved.
 """
 
 from __future__ import annotations
@@ -65,25 +66,7 @@ def configure_logging() -> None:
 
 
 def load_accident_data(file_path: Path = RAW_DATA_PATH) -> pd.DataFrame:
-	"""Load the source accident dataset from disk.
-
-	Parameters
-	----------
-	file_path:
-		Path to the accident CSV file.
-
-	Returns
-	-------
-	pandas.DataFrame
-		The raw accident dataset.
-
-	Raises
-	------
-	FileNotFoundError
-		If the accident dataset does not exist.
-	ValueError
-		If the dataset is empty or missing the Location column.
-	"""
+	"""Load the source accident dataset from disk."""
 
 	if not file_path.exists():
 		raise FileNotFoundError(f"Accident dataset not found: {file_path}")
@@ -161,26 +144,7 @@ def geocode_location(
 	timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 	max_retries: int = MAX_GEOCODE_RETRIES,
 ) -> dict:
-	"""Geocode a single standardized location using the Google Maps API.
-
-	Parameters
-	----------
-	location_name:
-		Standardized location string to geocode.
-	api_key:
-		Google Maps Geocoding API key.
-	session:
-		Optional requests session for connection reuse.
-	timeout_seconds:
-		Network timeout per request.
-	max_retries:
-		Number of attempts for transient API or network failures.
-
-	Returns
-	-------
-	dict
-		Dictionary containing location_name, formatted_address, latitude, and longitude.
-	"""
+	"""Geocode a single standardized location using the Google Maps API."""
 
 	if not location_name:
 		raise ValueError("Location name cannot be empty.")
@@ -287,6 +251,35 @@ def save_failed_locations(dataframe: pd.DataFrame, file_path: Path = FAILED_LOCA
 	dataframe.to_csv(file_path, index=False)
 
 
+def merge_and_save_enriched_dataset() -> None:
+	"""Merge the accident dataset with the location master and save the result.
+
+	This always runs at the end of main(), regardless of how many locations
+	were geocoded in the current run.
+	"""
+
+	if not LOCATION_MASTER_PATH.exists():
+		LOGGER.warning("No location master found — skipping merge.")
+		return
+
+	accidents = load_accident_data()
+	location_master = load_existing_location_master()
+
+	accidents["location_standardized"] = accidents["Location"].apply(standardize_location)
+
+	enriched = accidents.merge(
+		location_master,
+		left_on="location_standardized",
+		right_on="location_name",
+		how="left",
+	)
+
+	output_path = ROOT_DIR / "data" / "processed" / "accidents_with_coords.csv"
+	output_path.parent.mkdir(parents=True, exist_ok=True)
+	enriched.to_csv(output_path, index=False)
+	LOGGER.info("Saved enriched dataset to %s", output_path)
+
+
 def _extract_unique_locations(dataframe: pd.DataFrame) -> List[str]:
 	"""Extract unique standardized locations while preserving first-seen order."""
 
@@ -333,6 +326,7 @@ def main() -> None:
 
 	if not locations_to_geocode:
 		LOGGER.info("No new locations to geocode. Location master is already up to date.")
+		merge_and_save_enriched_dataset()
 		return
 
 	successful_rows = []
@@ -389,6 +383,9 @@ def main() -> None:
 	if not failed_df.empty:
 		save_failed_locations(failed_df)
 		LOGGER.info("Saved %s failed geocoding attempts to %s.", len(failed_df), FAILED_LOCATIONS_PATH)
+
+	# Always merge at the end, regardless of success/failure above
+	merge_and_save_enriched_dataset()
 
 
 if __name__ == "__main__":
