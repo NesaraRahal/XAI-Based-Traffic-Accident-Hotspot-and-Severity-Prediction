@@ -28,7 +28,7 @@ from dateutil.easter import easter
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-RAW_DATA_PATH = ROOT_DIR / "data" / "raw" / "accidents_colombo_expanded.csv"
+RAW_DATA_PATH = ROOT_DIR / "data" / "raw" / "traffic_accidents_colombo.csv"
 WEATHER_ENRICHED_DATA_PATH = ROOT_DIR / "data" / "processed" / "accidents_with_weather.csv"
 ENRICHED_DATA_PATH = ROOT_DIR / "data" / "processed" / "accidents_with_coords.csv"
 OUTPUT_PATH = ROOT_DIR / "data" / "processed" / "accidents_feature_engineered.csv"

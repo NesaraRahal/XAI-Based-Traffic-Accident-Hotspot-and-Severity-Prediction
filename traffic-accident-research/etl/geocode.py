@@ -36,7 +36,7 @@ def load_dotenv(*args, **kwargs):
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-RAW_DATA_PATH = ROOT_DIR / "data" / "raw" / "accidents_colombo_expanded.csv"
+RAW_DATA_PATH = ROOT_DIR / "data" / "raw" / "traffic_accidents_colombo.csv"
 REFERENCE_DIR = ROOT_DIR / "data" / "reference"
 LOCATION_MASTER_PATH = REFERENCE_DIR / "location_master.csv"
 FAILED_LOCATIONS_PATH = REFERENCE_DIR / "failed_locations.csv"
