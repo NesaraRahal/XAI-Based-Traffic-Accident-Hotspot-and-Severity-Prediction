@@ -38,6 +38,8 @@ import h3
 import pandas as pd
 from dotenv import load_dotenv
 from pymongo import MongoClient, UpdateOne
+from scipy.stats import poisson
+from statsmodels.stats.multitest import multipletests
 
 # ── Environment ────────────────────────────────────────────────────────────
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -64,7 +66,7 @@ H3_RESOLUTIONS = [8, 9]
 PRIMARY_RESOLUTION = 8
 NEIGHBOR_RING_K = 1
 ROLLING_WINDOWS_DAYS = [30, 90, 180]
-HOTSPOT_PERCENTILE_THRESHOLD = 0.75  # top-quartile cells (by accident count) = hotspot
+HOTSPOT_FDR_ALPHA = 0.05  # Benjamini-Hochberg false discovery rate threshold for hotspot significance
 
 LOGGER = logging.getLogger(__name__)
 
@@ -248,19 +250,31 @@ def compute_static_cell_aggregates(dataframe: pd.DataFrame, resolution: int) -> 
             .rename(columns={cell_column: "h3_cell"})
         )
         aggregates = aggregates.merge(severity_counts, on="h3_cell", how="left")
-        aggregates["fatal_rat   e"] = (
+        aggregates["fatal_rate"] = (
             aggregates["fatal_count"] / aggregates["accident_count"]
         ).round(4)
 
-    # Hotspot label: top quartile of accident_count across cells with >=1 accident
-    threshold_value = aggregates["accident_count"].quantile(HOTSPOT_PERCENTILE_THRESHOLD)
-    aggregates["is_hotspot"] = aggregates["accident_count"] >= threshold_value
+    # Hotspot label: one-sided Poisson test per cell against the CMC-wide mean
+    # accident rate, i.e. "is this cell's count significantly higher than
+    # expected under complete spatial randomness at the same overall rate,"
+    # with Benjamini-Hochberg FDR correction since we're running one test per
+    # cell simultaneously (avoids the multiple-testing inflation that a raw
+    # per-cell p-value threshold would produce across dozens/hundreds of cells).
+    mean_rate = aggregates["accident_count"].mean()
+    aggregates["hotspot_p_value"] = aggregates["accident_count"].apply(
+        lambda observed_count: poisson.sf(observed_count - 1, mean_rate)
+    )
+    _, adjusted_p_values, _, _ = multipletests(
+        aggregates["hotspot_p_value"], alpha=HOTSPOT_FDR_ALPHA, method="fdr_bh"
+    )
+    aggregates["hotspot_p_adjusted"] = adjusted_p_values
+    aggregates["is_hotspot"] = adjusted_p_values < HOTSPOT_FDR_ALPHA
 
     aggregates = aggregates.sort_values("accident_count", ascending=False).reset_index(drop=True)
 
     LOGGER.info(
-        "res=%d: %d unique cells | hotspot threshold=%.1f accidents | %d cells flagged hotspot",
-        resolution, len(aggregates), threshold_value, aggregates["is_hotspot"].sum(),
+        "res=%d: %d unique cells | mean rate=%.2f accidents/cell | %d cells flagged hotspot (FDR alpha=%.2f)",
+        resolution, len(aggregates), mean_rate, aggregates["is_hotspot"].sum(), HOTSPOT_FDR_ALPHA,
     )
     return aggregates
 
