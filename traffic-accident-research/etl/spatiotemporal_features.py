@@ -248,7 +248,7 @@ def compute_static_cell_aggregates(dataframe: pd.DataFrame, resolution: int) -> 
             .rename(columns={cell_column: "h3_cell"})
         )
         aggregates = aggregates.merge(severity_counts, on="h3_cell", how="left")
-        aggregates["fatal_rate"] = (
+        aggregates["fatal_rat   e"] = (
             aggregates["fatal_count"] / aggregates["accident_count"]
         ).round(4)
 
