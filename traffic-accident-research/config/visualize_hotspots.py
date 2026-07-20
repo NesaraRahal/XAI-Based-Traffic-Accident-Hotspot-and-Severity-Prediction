@@ -132,7 +132,9 @@ def build_map(cell_aggregates: pd.DataFrame, resolution: int) -> folium.Map:
             popup_lines.append(f"<b>Fatal:</b> {int(row['fatal_count'])}")
         if "fatal_rate" in row and pd.notna(row.get("fatal_rate")):
             popup_lines.append(f"<b>Fatal rate:</b> {row['fatal_rate']:.1%}")
-        popup_lines.append(f"<b>Hotspot:</b> {'Yes' if is_hotspot else 'No'}")
+        if "hotspot_p_adjusted" in row and pd.notna(row.get("hotspot_p_adjusted")):
+            popup_lines.append(f"<b>Adjusted p-value:</b> {row['hotspot_p_adjusted']:.4f}")
+        popup_lines.append(f"<b>Hotspot (FDR-corrected):</b> {'Yes' if is_hotspot else 'No'}")
 
         folium.Polygon(
             locations=boundary,
