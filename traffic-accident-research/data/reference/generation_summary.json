@@ -1,0 +1,60 @@
+{
+  "generation_timestamp": "2026-08-02T16:14:00.147614",
+  "seed": 42,
+  "total_records": 3688,
+  "records_2022": 1861,
+  "records_2023": 1827,
+  "slave_island_records": 500,
+  "divisions_covered": 17,
+  "divisions_excluded": [
+    "Dam Street",
+    "Foreshore Ports",
+    "Harbour",
+    "Keselwatte",
+    "Pettah",
+    "Wolfendhal"
+  ],
+  "severity_distribution": {
+    "Minor": 0.4094,
+    "Serious": 0.2809,
+    "Damage-only": 0.16,
+    "Fatal": 0.1497
+  },
+  "location_vocabulary_source": "E:\\Final year research\\Accident_Hotspot_Predcition\\traffic-accident-research\\etl\\OSM\\verified_streets_by_division.json",
+  "location_vocabulary_stats": {
+    "Bambalapitiya": 85,
+    "Bluemendhal": 19,
+    "Borella": 58,
+    "Cinnamon Gardens": 75,
+    "Dematagoda": 20,
+    "Fort": 81,
+    "Grandpass": 25,
+    "Slave Island": 64,
+    "Kirulapone": 47,
+    "Colpetty": 41,
+    "Kotahena": 24,
+    "Maligawatte": 33,
+    "Maradana": 17,
+    "Mattakkuliya": 39,
+    "Modera": 16,
+    "Narahenpita": 51,
+    "Wellawatte": 75
+  },
+  "anchors_used": {
+    "spatial": "DCS Table 7.5 (Colombo, 2022 & 2023)",
+    "severity": "Summary Report on Road Traffic Accidents 2025",
+    "time_fatal": "Thilakarathna et al. 2025 (fatal, Ragama)",
+    "time_nonfatal": "Jayasinghe et al. 2025 (all-severity, Matara)",
+    "cause_fatal": "Thilakarathna et al. 2025",
+    "cause_nonfatal": "Jayasinghe et al. 2025",
+    "collision": "Thilakarathna et al. 2025 (fatal, applied uniformly)",
+    "age": "Thilakarathna et al. 2025 (victim age used as driver proxy)",
+    "locations": "OpenStreetMap via osmnx (see build_street_vocab.py)"
+  },
+  "conditional_rules_applied": [
+    "R1: Night + main road -> severity upshift +10%",
+    "R2: Motorcycle or pedestrian -> severity upshift +15%",
+    "R3: Alcohol cause -> severity upshift +20%"
+  ],
+  "slave_island_oversampling_note": "Slave Island records total 500 (vs 91 by strict DCS 7.5) to provide TSTR validation power against 50 held-out real records."
+}
