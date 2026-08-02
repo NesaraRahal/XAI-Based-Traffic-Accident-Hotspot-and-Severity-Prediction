@@ -81,7 +81,7 @@ def main():
     LOGGER.info("=== Data Lake → MongoDB Ingest Start ===")
 
     # Paths to your raw CSVs
-    accidents_csv = ROOT_DIR / "data" / "raw" / "traffic_accidents_colombo.csv"
+    accidents_csv = ROOT_DIR / "data" / "raw" / "synthetic_cma_accidents_2022_2023.csv"
     weather_csv   = ROOT_DIR / "data" / "raw" / "Colombo_weather_2022_to_2026.csv"
 
     # Step 1 — Write raw CSVs into the data lake as JSON (no changes to data)
