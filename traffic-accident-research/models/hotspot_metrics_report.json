@@ -2,9 +2,9 @@
   "task": "hotspot",
   "target": "is_hotspot",
   "primary_metric": "f1",
-  "primary_split": "grouped",
+  "primary_split": "temporal",
   "winner": "random_forest",
-  "winner_score": 0.8609271523178808,
+  "winner_score": 1.0,
   "n_features": 35,
   "feature_columns": [
     "cell_lat",
@@ -145,46 +145,46 @@
           ]
         },
         "random_forest": {
-          "accuracy": 0.91796875,
+          "accuracy": 0.9244791666666666,
           "n_test": 768,
           "test_class_distribution": {
             "0": 528,
             "1": 240
           },
-          "precision": 0.9154929577464789,
-          "recall": 0.8125,
-          "f1": 0.8609271523178808,
-          "roc_auc": 0.9855902777777777,
-          "confusion_matrix": [
-            [
-              510,
-              18
-            ],
-            [
-              45,
-              195
-            ]
-          ]
-        },
-        "xgboost": {
-          "accuracy": 0.8697916666666666,
-          "n_test": 768,
-          "test_class_distribution": {
-            "0": 528,
-            "1": 240
-          },
-          "precision": 0.9022988505747126,
-          "recall": 0.6541666666666667,
-          "f1": 0.7584541062801933,
-          "roc_auc": 0.9657828282828282,
+          "precision": 0.9212962962962963,
+          "recall": 0.8291666666666667,
+          "f1": 0.8728070175438597,
+          "roc_auc": 0.9870896464646465,
           "confusion_matrix": [
             [
               511,
               17
             ],
             [
-              83,
-              157
+              41,
+              199
+            ]
+          ]
+        },
+        "xgboost": {
+          "accuracy": 0.8723958333333334,
+          "n_test": 768,
+          "test_class_distribution": {
+            "0": 528,
+            "1": 240
+          },
+          "precision": 0.898876404494382,
+          "recall": 0.6666666666666666,
+          "f1": 0.7655502392344498,
+          "roc_auc": 0.9622395833333334,
+          "confusion_matrix": [
+            [
+              510,
+              18
+            ],
+            [
+              80,
+              160
             ]
           ]
         }

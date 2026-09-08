@@ -150,6 +150,16 @@ def plot_train_vs_test_f1(panel: pd.DataFrame, X, y) -> None:
 def _clone_and_refit(fitted_model, X_train, y_train, name):
     """Copy hyperparameters from the persisted fitted model, then re-fit
     on a fresh (X, y) so we can measure both train and test scores honestly.
+
+    Note on XGBoost: the persisted model has early_stopping_rounds=20 set
+    in its hyperparameters, which requires an eval_set at fit time. For
+    these diagnostic plots we want to fit the model *the same way it was
+    trained*, but without needing to also pass an eval set here. We strip
+    early_stopping_rounds from the cloned model so it runs the full
+    n_estimators. This means the diagnostic tree count matches the
+    persisted model's n_estimators cap, not its early-stopping halt point —
+    the training-curve plot (07) is the correct place to see where early
+    stopping actually kicks in.
     """
     from sklearn.base import clone
     # LR was trained on scaled features; RF and XGB weren't. Match that.
@@ -165,6 +175,10 @@ def _clone_and_refit(fitted_model, X_train, y_train, name):
         return _ScaledWrapper(m, scaler)
     else:
         m = clone(fitted_model)
+        # If XGBoost has early_stopping_rounds set, strip it — refit here is
+        # standalone (no eval_set), and early stopping would raise ValueError.
+        if name == "xgboost" and getattr(m, "early_stopping_rounds", None) is not None:
+            m.set_params(early_stopping_rounds=None)
         m.fit(X_train, y_train)
         return m
 
@@ -443,10 +457,19 @@ def plot_xgboost_training_curves(panel: pd.DataFrame, X, y) -> None:
 
     # Fresh model with the SAME hyperparameters as the trained one, but tracking
     # both logloss and error on train + test at every round.
+    #
+    # We DELIBERATELY strip early_stopping_rounds here — the point of this plot
+    # is to show the FULL training curve (all n_estimators rounds), so the
+    # reader can see the divergence between train and test. If early stopping
+    # were active, the curve would be truncated at the halt round and the
+    # overfitting shape wouldn't be visible.
     params = ref.get_params()
-    # Keep n_estimators as-is (300 in your setup), request both metrics
+    tracker_params = {
+        k: v for k, v in params.items()
+        if k not in ("eval_metric", "early_stopping_rounds")
+    }
     tracker = XGBClassifier(
-        **{k: v for k, v in params.items() if k != "eval_metric"},
+        **tracker_params,
         eval_metric=["logloss", "error"],
     )
     tracker.fit(

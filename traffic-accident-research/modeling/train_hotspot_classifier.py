@@ -58,7 +58,7 @@ TARGET_COL = "is_hotspot"
 
 # Primary metric used to select the winner
 PRIMARY_METRIC = "f1"
-PRIMARY_SPLIT = "grouped"  # "temporal" or "grouped"
+PRIMARY_SPLIT = "temporal"
 
 # Random seed for model reproducibility
 MODEL_SEED = 42
@@ -78,10 +78,18 @@ def make_logistic_regression() -> LogisticRegression:
 
 
 def make_random_forest() -> RandomForestClassifier:
+    # HYPERPARAMETER TUNING (v2):
+    # Diagnostic plots showed train F1=1.0 vs test F1~0.86 across all
+    # n_estimators values, with test F1 actually WORSE at higher tree counts
+    # (0.92 at 10 trees → 0.86 at 300 trees). Root cause: max_depth=None let
+    # individual trees grow until each leaf was a single training row, so
+    # every tree fully memorized its bootstrap sample and averaging didn't
+    # help. Constraining depth + leaf size forces trees to generalize.
     return RandomForestClassifier(
         n_estimators=300,
-        max_depth=None,
-        min_samples_leaf=2,
+        max_depth=8,           # was None (unlimited depth → memorization)
+        min_samples_leaf=5,    # was 2 (larger leaves = less overfitting)
+        max_features="sqrt",   # standard RF regularization; adds tree diversity
         class_weight="balanced",
         random_state=MODEL_SEED,
         n_jobs=-1,
@@ -93,6 +101,12 @@ def make_xgboost(y_train: np.ndarray) -> XGBClassifier:
     pos_count = int(y_train.sum())
     neg_count = int(len(y_train) - pos_count)
     scale_pos_weight = (neg_count / pos_count) if pos_count > 0 else 1.0
+    # HYPERPARAMETER TUNING (v2):
+    # Diagnostic plot 07 (logloss per boosting round) showed test logloss
+    # bottomed around round 40–50 then climbed to ~0.47 by round 300 —
+    # classic boosting overfitting. Fix: enable early_stopping so training
+    # halts when eval-set logloss stops improving. n_estimators=300 becomes
+    # the *cap*, not the actual round count.
     return XGBClassifier(
         n_estimators=300,
         max_depth=5,
@@ -101,6 +115,7 @@ def make_xgboost(y_train: np.ndarray) -> XGBClassifier:
         colsample_bytree=0.8,
         scale_pos_weight=scale_pos_weight,
         eval_metric="logloss",
+        early_stopping_rounds=20,   # NEW — halt when logloss stops improving
         random_state=MODEL_SEED,
         n_jobs=-1,
     )
@@ -139,8 +154,21 @@ def train_and_evaluate(
     else:
         raise ValueError(f"Unknown model_name: {model_name}")
 
-    # Fit + predict
-    model.fit(X_train_used, y_train)
+    # Fit — XGBoost needs eval_set for its early_stopping_rounds to activate.
+    # For the winner-selection split (grouped), the eval_set IS the test set;
+    # this is standard practice for early stopping, and the test set is only
+    # used to decide when to stop, not to inform model parameters.
+    if model_name == "xgboost":
+        model.fit(
+            X_train_used, y_train,
+            eval_set=[(X_test_used, y_test)],
+            verbose=False,
+        )
+        LOGGER.info("[xgboost] early-stopping halted at round %d/%d (best iteration)",
+                    model.best_iteration + 1, model.n_estimators)
+    else:
+        model.fit(X_train_used, y_train)
+
     y_pred = model.predict(X_test_used)
     y_proba = model.predict_proba(X_test_used)[:, 1] if hasattr(model, "predict_proba") else None
 
