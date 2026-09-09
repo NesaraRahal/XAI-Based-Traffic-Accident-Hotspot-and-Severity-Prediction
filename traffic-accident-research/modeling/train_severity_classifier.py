@@ -116,22 +116,43 @@ def make_logistic_regression() -> LogisticRegression:
 def make_random_forest() -> RandomForestClassifier:
     # Same hyperparameter constraints as hotspot classifier — tuned via
     # diagnostic plots to prevent per-tree memorisation on small data.
+    #
+    # AGGRESSIVE CLASS WEIGHTS (binary severity only):
+    # class_weight="balanced" alone was insufficient — the model still
+    # heavily biased toward predicting non-severe (recall on severe class
+    # was only ~31%). Manually up-weighting the severe class by a factor
+    # beyond "balanced" (which uses inverse frequency ≈ 2.04) pushes the
+    # decision boundary toward better severe-recall at the cost of some
+    # precision. F1 improves because recall was the limiting factor.
+    if IS_BINARY:
+        class_weight = {0: 1.0, 1: 3.0}   # was "balanced"
+    else:
+        class_weight = "balanced"
     return RandomForestClassifier(
         n_estimators=300,
         max_depth=8,
         min_samples_leaf=5,
         max_features="sqrt",
-        class_weight="balanced",
+        class_weight=class_weight,
         random_state=MODEL_SEED,
         n_jobs=-1,
     )
 
 
 def make_xgboost_binary(y_train: np.ndarray) -> XGBClassifier:
-    """Binary XGBoost with scale_pos_weight for class imbalance + early stopping."""
+    """Binary XGBoost with scale_pos_weight for class imbalance + early stopping.
+
+    AGGRESSIVE CLASS WEIGHTING: standard scale_pos_weight = neg/pos gives
+    us the "balanced" starting point. We multiply by 1.5x to push the
+    boundary further toward better severe-recall, matching the RF override
+    above. Chosen because ROC-AUC of ~0.75 shows the model has real
+    discriminative signal — we just need to move the threshold effectively
+    via loss weighting.
+    """
     pos_count = int(y_train.sum())
     neg_count = int(len(y_train) - pos_count)
-    scale_pos_weight = (neg_count / pos_count) if pos_count > 0 else 1.0
+    balanced_ratio = (neg_count / pos_count) if pos_count > 0 else 1.0
+    scale_pos_weight = balanced_ratio * 1.5   # was just balanced_ratio
     return XGBClassifier(
         n_estimators=300,
         max_depth=5,
@@ -216,14 +237,40 @@ def train_and_evaluate(
     else:
         raise ValueError(f"Unknown model_name: {model_name}")
 
-    y_pred = model.predict(X_test_used)
-
-    # Metrics differ between binary and multiclass
+    # ── Prediction path differs for binary (threshold tuning) vs multiclass ─
     if IS_BINARY:
+        # THRESHOLD TUNING: default cutoff 0.5 isn't always F1-optimal,
+        # especially with class-weighted training. We find the threshold
+        # that maximises F1 on TRAINING predictions (no test-set peek),
+        # then apply it to test. This is standard for imbalanced binary
+        # classification and does not use test information for model tuning.
+        y_train_proba = model.predict_proba(X_train_used)[:, 1] if hasattr(model, "predict_proba") else None
         y_proba = model.predict_proba(X_test_used)[:, 1] if hasattr(model, "predict_proba") else None
+
+        threshold = 0.5
+        if y_train_proba is not None:
+            from sklearn.metrics import f1_score as _f1
+            best_f1, best_thr = -1.0, 0.5
+            y_train_arr = y_train.values if hasattr(y_train, "values") else y_train
+            for thr in np.linspace(0.1, 0.9, 33):
+                preds = (y_train_proba >= thr).astype(int)
+                f1 = _f1(y_train_arr, preds, zero_division=0)
+                if f1 > best_f1:
+                    best_f1, best_thr = f1, thr
+            threshold = best_thr
+            LOGGER.info("[%s] F1-optimal threshold on train = %.3f (train F1 at threshold = %.3f)",
+                        model_name, threshold, best_f1)
+
+        if y_proba is not None:
+            y_pred = (y_proba >= threshold).astype(int)
+        else:
+            y_pred = model.predict(X_test_used)
+
         y_true = y_test.values if hasattr(y_test, "values") else y_test
         metrics = compute_metrics(y_true, y_pred, y_proba, task="binary")
+        metrics["tuned_threshold"] = float(threshold)
     else:
+        y_pred = model.predict(X_test_used)
         # For multiclass: decode integer targets back to strings for the metrics report
         y_pred_decoded = label_encoder.inverse_transform(y_pred)
         y_test_decoded = label_encoder.inverse_transform(y_test)
@@ -233,7 +280,12 @@ def train_and_evaluate(
             task="multiclass", class_labels=present_classes,
         )
 
-    return {"model": model, "scaler": scaler, "metrics": metrics}
+    return {
+        "model": model,
+        "scaler": scaler,
+        "metrics": metrics,
+        "tuned_threshold": metrics.get("tuned_threshold", 0.5),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -397,6 +449,21 @@ def main() -> None:
     save_model_artifacts(
         TASK, winner_name, winner_bundle["model"], feature_columns, is_winner=True,
     )
+
+    # Step 6a — Save the tuned threshold alongside the winner (binary only).
+    # The dashboard/inference layer must apply this threshold to probability
+    # predictions instead of the default 0.5, or F1 will regress.
+    if IS_BINARY:
+        threshold_path = MODELS_DIR / f"{TASK}_winner_threshold.joblib"
+        joblib.dump(
+            {
+                "tuned_threshold": winner_bundle["tuned_threshold"],
+                "winner_model": winner_name,
+            },
+            threshold_path,
+        )
+        LOGGER.info("Saved tuned threshold: %s (threshold=%.3f)",
+                    threshold_path, winner_bundle["tuned_threshold"])
 
     # Step 6b — Save label encoder (multiclass only)
     if not IS_BINARY:
