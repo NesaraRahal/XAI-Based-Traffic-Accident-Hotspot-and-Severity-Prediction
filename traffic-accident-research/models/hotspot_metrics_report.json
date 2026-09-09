@@ -2,9 +2,9 @@
   "task": "hotspot",
   "target": "is_hotspot",
   "primary_metric": "f1",
-  "primary_split": "temporal",
+  "primary_split": "grouped",
   "winner": "random_forest",
-  "winner_score": 1.0,
+  "winner_score": 0.9171974522292994,
   "n_features": 35,
   "feature_columns": [
     "cell_lat",
@@ -72,24 +72,24 @@
           ]
         },
         "random_forest": {
-          "accuracy": 1.0,
+          "accuracy": 0.9620253164556962,
           "n_test": 316,
           "test_class_distribution": {
             "0": 232,
             "1": 84
           },
-          "precision": 1.0,
-          "recall": 1.0,
-          "f1": 1.0,
-          "roc_auc": 1.0,
+          "precision": 0.9090909090909091,
+          "recall": 0.9523809523809523,
+          "f1": 0.9302325581395349,
+          "roc_auc": 0.9980500821018062,
           "confusion_matrix": [
             [
-              232,
-              0
+              224,
+              8
             ],
             [
-              0,
-              84
+              4,
+              80
             ]
           ]
         },
@@ -145,24 +145,24 @@
           ]
         },
         "random_forest": {
-          "accuracy": 0.9244791666666666,
+          "accuracy": 0.94921875,
           "n_test": 768,
           "test_class_distribution": {
             "0": 528,
             "1": 240
           },
-          "precision": 0.9212962962962963,
-          "recall": 0.8291666666666667,
-          "f1": 0.8728070175438597,
-          "roc_auc": 0.9870896464646465,
+          "precision": 0.935064935064935,
+          "recall": 0.9,
+          "f1": 0.9171974522292994,
+          "roc_auc": 0.9877604166666667,
           "confusion_matrix": [
             [
-              511,
-              17
+              513,
+              15
             ],
             [
-              41,
-              199
+              24,
+              216
             ]
           ]
         },

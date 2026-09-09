@@ -68,7 +68,7 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 ID_COLUMNS = ["h3_cell", "year_month", "built_at", "year", "month",
               "label_training_window_end"]
 
-LABEL_COLUMNS = ["is_hotspot", "dominant_severity"]
+LABEL_COLUMNS = ["is_hotspot", "dominant_severity", "is_severe"]
 
 # LEAKAGE-FIXED: any column derived from same-month accidents, or that
 # directly composes the label, must be excluded from features.

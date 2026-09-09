@@ -279,6 +279,19 @@ def compute_training_window_labels(accidents: pd.DataFrame) -> pd.DataFrame:
         return tied[0]  # worst-severity wins (SEVERITY_LADDER is worst→least)
 
     sev_counts["dominant_severity"] = sev_counts.apply(pick_dominant, axis=1)
+
+    # is_severe: binary reformulation of dominant_severity.
+    # Following Al-Omari et al. (2025), collapsing 4-class severity into
+    # Severe (Fatal ∪ Serious) vs Non-severe (Minor ∪ Damage-only) aligns
+    # with the operational question of "should this cell be prioritised for
+    # injury-prevention intervention?" and mitigates the extreme sparsity
+    # of the Damage-only class (3 cells) and Fatal class (8 cells) in the
+    # training window, which makes 4-class generalisation to unseen cells
+    # unreliable (see thesis §3.5 limitations).
+    #
+    # Both labels are emitted; downstream classifiers can target either.
+    sev_counts["is_severe"] = sev_counts["dominant_severity"].isin(["Fatal", "Serious"])
+
     train_sev = sev_counts.reset_index().rename(columns={
         CELL_COLUMN: "h3_cell",
         "Fatal": "train_fatal_count",
@@ -596,7 +609,7 @@ def attach_labels_and_context(
 
     # Training-window labels
     panel = panel.merge(
-        labels[["h3_cell", "is_hotspot", "dominant_severity",
+        labels[["h3_cell", "is_hotspot", "dominant_severity", "is_severe",
                 "accident_count", "hotspot_p_adjusted_train",
                 "train_fatal_count", "train_serious_count",
                 "train_minor_count", "train_damage_only_count"]]
@@ -604,6 +617,7 @@ def attach_labels_and_context(
         on="h3_cell", how="left",
     )
     panel["is_hotspot"] = panel["is_hotspot"].fillna(False)
+    panel["is_severe"] = panel["is_severe"].fillna(False)
 
     # Static context (police division, cell centroid)
     panel = panel.merge(static_context, on="h3_cell", how="left")
@@ -728,9 +742,13 @@ def build_panel() -> pd.DataFrame:
         LOGGER.info("Label training window ends at: %s", LABEL_TRAINING_WINDOW_END.date())
         LOGGER.info("Hotspot cells (training-window Poisson-FDR): %d",
                     panel.drop_duplicates("h3_cell")["is_hotspot"].sum())
-        LOGGER.info("Dominant severity distribution (per-cell view):")
+        LOGGER.info("Dominant severity distribution (per-cell view — 4-class):")
         LOGGER.info("\n%s",
                     panel.drop_duplicates("h3_cell")["dominant_severity"]
+                    .value_counts(dropna=False).to_string())
+        LOGGER.info("Binary severity distribution (per-cell view — is_severe):")
+        LOGGER.info("\n%s",
+                    panel.drop_duplicates("h3_cell")["is_severe"]
                     .value_counts(dropna=False).to_string())
         LOGGER.info("=== Training Panel Build Complete ===")
         return panel

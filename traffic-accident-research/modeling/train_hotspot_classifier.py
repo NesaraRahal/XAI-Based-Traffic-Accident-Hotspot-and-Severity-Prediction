@@ -58,7 +58,7 @@ TARGET_COL = "is_hotspot"
 
 # Primary metric used to select the winner
 PRIMARY_METRIC = "f1"
-PRIMARY_SPLIT = "temporal"
+PRIMARY_SPLIT = "grouped"  # winner-selection split (per objective 3)
 
 # Random seed for model reproducibility
 MODEL_SEED = 42
@@ -326,8 +326,8 @@ def main() -> None:
     }
     save_metrics_report(TASK, report)
 
-    # Step 8 — SHAP on winner (using temporal split's test set)
-    winner_split = splits[0]  # temporal split
+# Step 8 — SHAP on winner (using the same split the winner was chosen on)
+    winner_split = next(s for s in splits if s.name == PRIMARY_SPLIT)
     X_train_win = X.iloc[winner_split.train_idx]
     X_test_win = X.iloc[winner_split.test_idx]
     compute_shap_for_winner(
