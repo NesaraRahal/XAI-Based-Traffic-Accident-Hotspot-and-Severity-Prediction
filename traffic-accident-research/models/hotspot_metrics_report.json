@@ -1,0 +1,194 @@
+{
+  "task": "hotspot",
+  "target": "is_hotspot",
+  "primary_metric": "f1",
+  "primary_split": "grouped",
+  "winner": "random_forest",
+  "winner_score": 0.9171974522292994,
+  "n_features": 35,
+  "feature_columns": [
+    "cell_lat",
+    "cell_lng",
+    "same_cell_count_30d",
+    "same_cell_count_90d",
+    "same_cell_count_180d",
+    "neighbor_count_30d",
+    "neighbor_count_90d",
+    "neighbor_count_180d",
+    "month_sin",
+    "month_cos",
+    "avg_precip_month",
+    "avg_humidity_month",
+    "avg_visibility_month",
+    "avg_cloudcover_month",
+    "rainy_days_share_month",
+    "holidays_in_month",
+    "historical_peak_hour_share",
+    "historical_night_share",
+    "historical_motorcycle_share",
+    "police_division_Bambalapitiya",
+    "police_division_Borella",
+    "police_division_Cinnamon Gardens",
+    "police_division_Colpetty",
+    "police_division_Dematagoda",
+    "police_division_Fort",
+    "police_division_Grandpass",
+    "police_division_Kirulapone",
+    "police_division_Kotahena",
+    "police_division_Maligawatte",
+    "police_division_Maradana",
+    "police_division_Mattakkuliya",
+    "police_division_Modera",
+    "police_division_Narahenpita",
+    "police_division_Slave Island",
+    "police_division_Wellawatte"
+  ],
+  "splits": {
+    "temporal": {
+      "description": "Train: year_month <= 2023-08 (1580 rows). Test: year_month >= 2023-09 (316 rows). Evaluates 'predict future months for known cells'. Labels are computed only from training-window accidents (no future leakage).",
+      "n_train": 1580,
+      "n_test": 316,
+      "models": {
+        "logistic_regression": {
+          "accuracy": 0.9556962025316456,
+          "n_test": 316,
+          "test_class_distribution": {
+            "0": 232,
+            "1": 84
+          },
+          "precision": 0.9166666666666666,
+          "recall": 0.9166666666666666,
+          "f1": 0.9166666666666666,
+          "roc_auc": 0.9933292282430214,
+          "confusion_matrix": [
+            [
+              225,
+              7
+            ],
+            [
+              7,
+              77
+            ]
+          ]
+        },
+        "random_forest": {
+          "accuracy": 0.9620253164556962,
+          "n_test": 316,
+          "test_class_distribution": {
+            "0": 232,
+            "1": 84
+          },
+          "precision": 0.9090909090909091,
+          "recall": 0.9523809523809523,
+          "f1": 0.9302325581395349,
+          "roc_auc": 0.9980500821018062,
+          "confusion_matrix": [
+            [
+              224,
+              8
+            ],
+            [
+              4,
+              80
+            ]
+          ]
+        },
+        "xgboost": {
+          "accuracy": 1.0,
+          "n_test": 316,
+          "test_class_distribution": {
+            "0": 232,
+            "1": 84
+          },
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "roc_auc": 1.0,
+          "confusion_matrix": [
+            [
+              232,
+              0
+            ],
+            [
+              0,
+              84
+            ]
+          ]
+        }
+      }
+    },
+    "grouped": {
+      "description": "Train: 47 cells (1128 rows). Test: 32 held-out cells (768 rows). Evaluates 'predict for unseen cells' (generalisation).",
+      "n_train": 1128,
+      "n_test": 768,
+      "models": {
+        "logistic_regression": {
+          "accuracy": 0.8997395833333334,
+          "n_test": 768,
+          "test_class_distribution": {
+            "0": 528,
+            "1": 240
+          },
+          "precision": 0.8326530612244898,
+          "recall": 0.85,
+          "f1": 0.8412371134020619,
+          "roc_auc": 0.9549005681818182,
+          "confusion_matrix": [
+            [
+              487,
+              41
+            ],
+            [
+              36,
+              204
+            ]
+          ]
+        },
+        "random_forest": {
+          "accuracy": 0.94921875,
+          "n_test": 768,
+          "test_class_distribution": {
+            "0": 528,
+            "1": 240
+          },
+          "precision": 0.935064935064935,
+          "recall": 0.9,
+          "f1": 0.9171974522292994,
+          "roc_auc": 0.9877604166666667,
+          "confusion_matrix": [
+            [
+              513,
+              15
+            ],
+            [
+              24,
+              216
+            ]
+          ]
+        },
+        "xgboost": {
+          "accuracy": 0.8723958333333334,
+          "n_test": 768,
+          "test_class_distribution": {
+            "0": 528,
+            "1": 240
+          },
+          "precision": 0.898876404494382,
+          "recall": 0.6666666666666666,
+          "f1": 0.7655502392344498,
+          "roc_auc": 0.9622395833333334,
+          "confusion_matrix": [
+            [
+              510,
+              18
+            ],
+            [
+              80,
+              160
+            ]
+          ]
+        }
+      }
+    }
+  }
+}

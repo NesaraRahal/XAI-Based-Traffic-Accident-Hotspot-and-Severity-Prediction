@@ -147,7 +147,7 @@ EXCLUDED_DIVISIONS = {
 # ============================================================================
 
 JSON_TO_DCS = {
-    "Kollupitiya": "Colpetty",     # OSM/postal name -> DCS name
+    "Kollupitiya": "Kollupitiya",     # OSM/postal name -> DCS name
     "Kirulapona":  "Kirulapone",   # OSM spelling -> DCS spelling
     "Bluemendhal": "Bluemendhal",  # already matches
     # Everything else in the JSON already uses DCS names

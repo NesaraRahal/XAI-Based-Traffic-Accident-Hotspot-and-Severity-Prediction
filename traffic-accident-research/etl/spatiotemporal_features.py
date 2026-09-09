@@ -58,7 +58,7 @@ COL_OUTPUT_SPATIOTEMPORAL = "accidents_spatiotemporal_features"
 DATE_COLUMN = "Date of Accident"
 LAT_COLUMN = "latitude"
 LNG_COLUMN = "longitude"
-SEVERITY_COLUMN = "Severity"  # adjust to match your raw schema if named differently
+SEVERITY_COLUMN = "Accident Severity"  # adjust to match your raw schema if named differently
 RECORD_ID_COLUMN = "_lake_id"
 
 # ── H3 / Spatiotemporal Config ──────────────────────────────────────────────
@@ -220,6 +220,9 @@ def compute_static_cell_aggregates(dataframe: pd.DataFrame, resolution: int) -> 
     individual accident records as a predictive feature, since that would
     leak each record's own outcome into its features — use
     compute_causal_rolling_features() for the modeling feature matrix instead.
+
+    Severity classes match the generator's taxonomy exactly:
+    Fatal / Serious / Minor / Damage-only.
     """
 
     cell_column = f"h3_res{resolution}"
@@ -243,8 +246,9 @@ def compute_static_cell_aggregates(dataframe: pd.DataFrame, resolution: int) -> 
             valid.groupby(cell_column)["_severity_lower"]
             .agg(
                 fatal_count=lambda s: (s == "fatal").sum(),
-                major_count=lambda s: (s == "major").sum(),
+                serious_count=lambda s: (s == "serious").sum(),
                 minor_count=lambda s: (s == "minor").sum(),
+                damage_only_count=lambda s: (s == "damage-only").sum(),
             )
             .reset_index()
             .rename(columns={cell_column: "h3_cell"})

@@ -2,8 +2,9 @@
 
 Reads the static per-cell aggregates (ref_h3_cell_aggregates, produced by
 etl/spatiotemporal_features.py) from MongoDB and renders them as hexagon
-polygons on a Leaflet map (via folium), colored by accident_count with
-hotspot cells outlined in red. Saves a standalone HTML file you can open
+polygons on a Leaflet map (via folium), colored by accident_count on a
+green (low) -> yellow (mid) -> red (high) severity scale, with hotspot
+cells outlined in dark red. Saves a standalone HTML file you can open
 directly in a browser — no separate frontend needed for this sanity check.
 
 Usage:
@@ -56,6 +57,13 @@ COL_CELL_AGGREGATES = "ref_h3_cell_aggregates"
 
 CMA_CENTER = [6.9271, 79.8612]  # Colombo Fort — default map center
 
+# Green -> yellow -> red gradient stops (ratio, (r, g, b))
+SEVERITY_GRADIENT = [
+    (0.0, (26, 152, 80)),    # green — low severity
+    (0.5, (255, 217, 47)),   # yellow — mid severity
+    (1.0, (215, 48, 39)),    # red — high severity
+]
+
 
 def load_cell_aggregates(resolution: int) -> pd.DataFrame:
     """Load static per-cell aggregates for a given H3 resolution from MongoDB."""
@@ -96,21 +104,19 @@ def load_cell_aggregates(resolution: int) -> pd.DataFrame:
 
 
 def color_for_count(count: int, max_count: int) -> str:
-    """Return a hex color on a light-to-dark red scale based on accident count."""
+    """Return a hex color on a green(low)->yellow(mid)->red(high) severity scale."""
 
     if max_count <= 0:
-        return "#feebe2"
+        return "#1a9850"
     ratio = min(count / max_count, 1.0)
-    # simple 5-step bucket scale, easy to eyeball on a sanity-check map
-    if ratio >= 0.8:
-        return "#99000d"
-    if ratio >= 0.6:
-        return "#cb181d"
-    if ratio >= 0.4:
-        return "#ef3b2c"
-    if ratio >= 0.2:
-        return "#fc9272"
-    return "#fee5d9"
+
+    for (r0, c0), (r1, c1) in zip(SEVERITY_GRADIENT, SEVERITY_GRADIENT[1:]):
+        if r0 <= ratio <= r1:
+            t = 0 if r1 == r0 else (ratio - r0) / (r1 - r0)
+            rgb = tuple(round(c0[i] + t * (c1[i] - c0[i])) for i in range(3))
+            return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+    return "#d73027"
 
 
 def build_map(cell_aggregates: pd.DataFrame, resolution: int) -> folium.Map:
@@ -150,12 +156,12 @@ def build_map(cell_aggregates: pd.DataFrame, resolution: int) -> folium.Map:
     <div style="position: fixed; bottom: 30px; left: 30px; z-index: 9999;
                 background: white; padding: 10px 14px; border-radius: 6px;
                 border: 1px solid #ccc; font-size: 13px;">
-      <b>H3 res {resolution} — accident count</b><br>
-      <span style="background:#fee5d9;padding:2px 8px;">&nbsp;</span> low<br>
-      <span style="background:#fc9272;padding:2px 8px;">&nbsp;</span><br>
-      <span style="background:#ef3b2c;padding:2px 8px;">&nbsp;</span><br>
-      <span style="background:#cb181d;padding:2px 8px;">&nbsp;</span><br>
-      <span style="background:#99000d;padding:2px 8px;color:white;">&nbsp;</span> high<br>
+      <b>H3 res {resolution} — severity</b><br>
+      <span style="background:#1a9850;padding:2px 8px;">&nbsp;</span> low<br>
+      <span style="background:#91cf60;padding:2px 8px;">&nbsp;</span><br>
+      <span style="background:#ffd92f;padding:2px 8px;">&nbsp;</span> med<br>
+      <span style="background:#fc8d59;padding:2px 8px;">&nbsp;</span><br>
+      <span style="background:#d73027;padding:2px 8px;color:white;">&nbsp;</span> high<br>
       <span style="border:2px solid #67000d;padding:1px 7px;">&nbsp;</span> hotspot outline
     </div>
     """
