@@ -40,6 +40,18 @@ Outputs (per mode):
     models/severity_<mode>_label_encoder.joblib   (multiclass only)
     models/severity_<mode>_metrics_report.json
     models/severity_<mode>_shap.joblib
+
+CHANGE LOG (this revision)
+---------------------------
+  * XGBoost's early-stopping round count and the binary decision threshold
+    were previously selected using X_test (eval_set) and X_train's own
+    in-sample predictions respectively — a test-set peek and an in-sample-
+    bias problem. Both are now selected on an INNER validation split carved
+    out of TRAIN ONLY, grouped by h3_cell so no cell straddles the inner
+    train/val boundary. X_test is never touched until final scoring.
+  * Once the round count / threshold are chosen on the inner split, the
+    PRODUCTION model that actually scores X_test is refit on the full
+    training set (all train rows/cells), so no training data is wasted.
 """
 
 from __future__ import annotations
@@ -54,6 +66,8 @@ import pandas as pd
 import shap
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import f1_score as _f1_score
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import XGBClassifier
@@ -93,8 +107,13 @@ elif SEVERITY_MODE == "multiclass":
 else:
     raise ValueError(f"SEVERITY_MODE must be 'binary' or 'multiclass', got {SEVERITY_MODE}")
 
-PRIMARY_SPLIT = "grouped"
+PRIMARY_SPLIT = "tempral"   # "temporal" or "grouped" — which split to use for winner selection
 MODEL_SEED = 42
+
+# Fraction of TRAIN cells (not test cells) held out, grouped by h3_cell, to
+# pick XGBoost's early-stopping round count and the binary decision
+# threshold. Never touches X_test.
+INNER_VAL_FRACTION = 0.2
 
 # 4-class ordering (only used when IS_BINARY=False)
 CLASS_ORDER = ["Fatal", "Serious", "Minor", "Damage-only"]
@@ -139,47 +158,106 @@ def make_random_forest() -> RandomForestClassifier:
     )
 
 
-def make_xgboost_binary(y_train: np.ndarray) -> XGBClassifier:
-    """Binary XGBoost with scale_pos_weight for class imbalance + early stopping.
+def make_xgboost_binary(
+    y_train: np.ndarray, n_estimators: int = 300, use_early_stopping: bool = True,
+) -> XGBClassifier:
+    """Binary XGBoost with scale_pos_weight for class imbalance.
 
     AGGRESSIVE CLASS WEIGHTING: standard scale_pos_weight = neg/pos gives
     us the "balanced" starting point. We multiply by 1.5x to push the
     boundary further toward better severe-recall, matching the RF override
-    above. Chosen because ROC-AUC of ~0.75 shows the model has real
-    discriminative signal — we just need to move the threshold effectively
-    via loss weighting.
+    above.
+
+    Two modes, both used by train_and_evaluate below:
+      - SELECTION mode (use_early_stopping=True): capped at n_estimators,
+        early stopping picks the actual round count against an INNER
+        validation split carved out of train (never X_test).
+      - PRODUCTION mode (use_early_stopping=False): n_estimators fixed to
+        whatever selection mode found; this is the model that scores X_test.
     """
     pos_count = int(y_train.sum())
     neg_count = int(len(y_train) - pos_count)
     balanced_ratio = (neg_count / pos_count) if pos_count > 0 else 1.0
     scale_pos_weight = balanced_ratio * 1.5   # was just balanced_ratio
-    return XGBClassifier(
-        n_estimators=300,
+    kwargs = dict(
+        n_estimators=n_estimators,
         max_depth=5,
         learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.8,
         scale_pos_weight=scale_pos_weight,
         eval_metric="logloss",
-        early_stopping_rounds=20,
         random_state=MODEL_SEED,
         n_jobs=-1,
     )
+    if use_early_stopping:
+        kwargs["early_stopping_rounds"] = 20
+    return XGBClassifier(**kwargs)
 
 
-def make_xgboost_multiclass() -> XGBClassifier:
-    """Multiclass XGBoost — sample_weight handled at fit time, early stopping enabled."""
-    return XGBClassifier(
-        n_estimators=300,
+def make_xgboost_multiclass(
+    n_estimators: int = 300, use_early_stopping: bool = True,
+) -> XGBClassifier:
+    """Multiclass XGBoost — sample_weight handled at fit time.
+
+    Same selection/production split as make_xgboost_binary above.
+    """
+    kwargs = dict(
+        n_estimators=n_estimators,
         max_depth=5,
         learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.8,
         objective="multi:softprob",
         eval_metric="mlogloss",
-        early_stopping_rounds=20,
         random_state=MODEL_SEED,
         n_jobs=-1,
+    )
+    if use_early_stopping:
+        kwargs["early_stopping_rounds"] = 20
+    return XGBClassifier(**kwargs)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Inner (train-only) validation split
+# ══════════════════════════════════════════════════════════════════════════
+
+def _inner_group_split(
+    X_train: pd.DataFrame, y_train: pd.Series, groups_train: np.ndarray,
+    val_frac: float = INNER_VAL_FRACTION, seed: int = MODEL_SEED,
+):
+    """Carve a validation slice out of TRAIN ONLY, grouped by h3_cell so no
+    cell straddles the inner train/val boundary. Used to pick the XGBoost
+    early-stopping round count and the binary decision threshold without
+    ever looking at the outer test set.
+
+    Falls back to a stratified row-level split if the grouped split happens
+    to drop an entire class from one side (can happen with rare classes like
+    Fatal/Damage-only, which only have a handful of cells to begin with).
+    """
+    y_arr = y_train.values if hasattr(y_train, "values") else np.asarray(y_train)
+
+    gss = GroupShuffleSplit(n_splits=1, test_size=val_frac, random_state=seed)
+    inner_train_pos, inner_val_pos = next(gss.split(X_train, y_arr, groups=groups_train))
+
+    train_labels = set(np.unique(y_arr[inner_train_pos]))
+    val_labels = set(np.unique(y_arr[inner_val_pos]))
+    all_labels = set(np.unique(y_arr))
+
+    if not all_labels.issubset(train_labels) or not val_labels:
+        LOGGER.warning(
+            "Grouped inner split dropped a class (inner-train classes=%s, "
+            "need=%s) — falling back to a stratified random inner split.",
+            sorted(train_labels), sorted(all_labels),
+        )
+        idx = np.arange(len(y_arr))
+        inner_train_pos, inner_val_pos = train_test_split(
+            idx, test_size=val_frac, random_state=seed, stratify=y_arr,
+        )
+
+    return (
+        X_train.iloc[inner_train_pos], y_train.iloc[inner_train_pos],
+        X_train.iloc[inner_val_pos], y_train.iloc[inner_val_pos],
     )
 
 
@@ -192,9 +270,72 @@ def train_and_evaluate(
     X_train, y_train, X_test, y_test,
     label_encoder,   # None for binary, LabelEncoder for multiclass
     scale_features: bool,
+    groups_train,    # h3_cell values aligned (positionally) with X_train rows
 ) -> Dict:
-    """Train one severity model on one split; return metrics dict + fitted model."""
+    """Train one severity model on one split; return metrics dict + fitted model.
 
+    Two-stage fit:
+      1. SELECTION — fit only on an inner train/val split carved out of
+         X_train (grouped by cell). Used to pick XGBoost's round count and
+         the binary threshold, both validated on the inner-val slice.
+      2. PRODUCTION — refit on the FULL X_train using whatever the
+         selection stage found. This is the model that scores X_test.
+    """
+
+    X_inner_train, y_inner_train, X_inner_val, y_inner_val = _inner_group_split(
+        X_train, y_train, groups_train,
+    )
+
+    # ── Stage 1: selection (inner split only, X_test never touched) ────────
+    inner_scaler = None
+    X_inner_train_s, X_inner_val_s = X_inner_train, X_inner_val
+    if scale_features:
+        inner_scaler = StandardScaler()
+        X_inner_train_s = pd.DataFrame(
+            inner_scaler.fit_transform(X_inner_train),
+            columns=X_inner_train.columns, index=X_inner_train.index,
+        )
+        X_inner_val_s = pd.DataFrame(
+            inner_scaler.transform(X_inner_val),
+            columns=X_inner_val.columns, index=X_inner_val.index,
+        )
+
+    best_n = 300  # only overwritten for xgboost below
+    if model_name == "logistic_regression":
+        selection_model = make_logistic_regression()
+        selection_model.fit(X_inner_train_s, y_inner_train)
+
+    elif model_name == "random_forest":
+        selection_model = make_random_forest()
+        selection_model.fit(X_inner_train_s, y_inner_train)
+
+    elif model_name == "xgboost":
+        if IS_BINARY:
+            y_inner_arr = y_inner_train.values if hasattr(y_inner_train, "values") else y_inner_train
+            selection_model = make_xgboost_binary(y_inner_arr, n_estimators=300, use_early_stopping=True)
+            selection_model.fit(
+                X_inner_train_s, y_inner_train,
+                eval_set=[(X_inner_val_s, y_inner_val)],
+                verbose=False,
+            )
+        else:
+            sample_weights_inner = compute_sample_weight(class_weight="balanced", y=y_inner_train)
+            selection_model = make_xgboost_multiclass(n_estimators=300, use_early_stopping=True)
+            selection_model.fit(
+                X_inner_train_s, y_inner_train,
+                sample_weight=sample_weights_inner,
+                eval_set=[(X_inner_val_s, y_inner_val)],
+                verbose=False,
+            )
+        best_n = selection_model.best_iteration + 1
+        LOGGER.info(
+            "[%s] inner-val early stopping halted at round %d/300 (best iteration)",
+            model_name, best_n,
+        )
+    else:
+        raise ValueError(f"Unknown model_name: {model_name}")
+
+    # ── Stage 2: production (full X_train, no test-set contact) ────────────
     scaler = None
     X_train_used, X_test_used = X_train, X_test
     if scale_features:
@@ -217,49 +358,41 @@ def train_and_evaluate(
     elif model_name == "xgboost":
         if IS_BINARY:
             y_train_arr = y_train.values if hasattr(y_train, "values") else y_train
-            model = make_xgboost_binary(y_train_arr)
-            model.fit(
-                X_train_used, y_train,
-                eval_set=[(X_test_used, y_test)],
-                verbose=False,
-            )
+            model = make_xgboost_binary(y_train_arr, n_estimators=best_n, use_early_stopping=False)
+            model.fit(X_train_used, y_train, verbose=False)
         else:
-            model = make_xgboost_multiclass()
-            sample_weights = compute_sample_weight(class_weight="balanced", y=y_train)
-            model.fit(
-                X_train_used, y_train,
-                sample_weight=sample_weights,
-                eval_set=[(X_test_used, y_test)],
-                verbose=False,
-            )
-        LOGGER.info("[xgboost] early-stopping halted at round %d/%d (best iteration)",
-                    model.best_iteration + 1, model.n_estimators)
-    else:
-        raise ValueError(f"Unknown model_name: {model_name}")
+            sample_weights_full = compute_sample_weight(class_weight="balanced", y=y_train)
+            model = make_xgboost_multiclass(n_estimators=best_n, use_early_stopping=False)
+            model.fit(X_train_used, y_train, sample_weight=sample_weights_full, verbose=False)
 
     # ── Prediction path differs for binary (threshold tuning) vs multiclass ─
     if IS_BINARY:
-        # THRESHOLD TUNING: default cutoff 0.5 isn't always F1-optimal,
-        # especially with class-weighted training. We find the threshold
-        # that maximises F1 on TRAINING predictions (no test-set peek),
-        # then apply it to test. This is standard for imbalanced binary
-        # classification and does not use test information for model tuning.
-        y_train_proba = model.predict_proba(X_train_used)[:, 1] if hasattr(model, "predict_proba") else None
+        # THRESHOLD TUNING: picked on the INNER VALIDATION split using the
+        # SELECTION model (fit only on X_inner_train, so X_inner_val is
+        # genuinely held out for it). This replaces the old approach of
+        # tuning against X_train predictions from a model fit on X_train
+        # itself, which is in-sample and uninformative once a model is
+        # close to memorising train (as RF/XGB tend to be here).
+        y_inner_val_proba = (
+            selection_model.predict_proba(X_inner_val_s)[:, 1]
+            if hasattr(selection_model, "predict_proba") else None
+        )
         y_proba = model.predict_proba(X_test_used)[:, 1] if hasattr(model, "predict_proba") else None
 
         threshold = 0.5
-        if y_train_proba is not None:
-            from sklearn.metrics import f1_score as _f1
+        if y_inner_val_proba is not None:
             best_f1, best_thr = -1.0, 0.5
-            y_train_arr = y_train.values if hasattr(y_train, "values") else y_train
+            y_inner_val_arr = y_inner_val.values if hasattr(y_inner_val, "values") else y_inner_val
             for thr in np.linspace(0.1, 0.9, 33):
-                preds = (y_train_proba >= thr).astype(int)
-                f1 = _f1(y_train_arr, preds, zero_division=0)
+                preds = (y_inner_val_proba >= thr).astype(int)
+                f1 = _f1_score(y_inner_val_arr, preds, zero_division=0)
                 if f1 > best_f1:
                     best_f1, best_thr = f1, thr
             threshold = best_thr
-            LOGGER.info("[%s] F1-optimal threshold on train = %.3f (train F1 at threshold = %.3f)",
-                        model_name, threshold, best_f1)
+            LOGGER.info(
+                "[%s] F1-optimal threshold on inner-val = %.3f (inner-val F1 at threshold = %.3f)",
+                model_name, threshold, best_f1,
+            )
 
         if y_proba is not None:
             y_pred = (y_proba >= threshold).astype(int)
@@ -386,6 +519,9 @@ def main() -> None:
         results[split.name] = {}
         X_train, X_test = X.iloc[split.train_idx], X.iloc[split.test_idx]
         y_train, y_test = y_encoded.iloc[split.train_idx], y_encoded.iloc[split.test_idx]
+        # h3_cell for each TRAIN row, aligned positionally with X_train/y_train.
+        # Used only to build the inner (train-only) validation split.
+        groups_train = panel["h3_cell"].iloc[split.train_idx].values
 
         # Missing-class warning (multiclass only)
         if not IS_BINARY:
@@ -404,6 +540,7 @@ def main() -> None:
             bundle = train_and_evaluate(
                 model_name, X_train, y_train, X_test, y_test,
                 label_encoder=label_encoder, scale_features=scale,
+                groups_train=groups_train,
             )
             results[split.name][model_name] = bundle
             m = bundle["metrics"]
@@ -503,9 +640,7 @@ def main() -> None:
         report["label_classes_present"] = list(label_encoder.classes_)
     save_metrics_report(TASK, report)
 
-    # Step 8 — SHAP on winner
-    winner_split = splits[0]  # temporal (first) — we save SHAP against grouped test below
-    # Actually we want SHAP on the primary (grouped) split, which is splits[1].
+    # Step 8 — SHAP on winner (primary/grouped split)
     primary_split_obj = next(s for s in splits if s.name == PRIMARY_SPLIT)
     X_train_win = X.iloc[primary_split_obj.train_idx]
     X_test_win = X.iloc[primary_split_obj.test_idx]
