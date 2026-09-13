@@ -3,10 +3,10 @@
   "mode": "binary",
   "target": "is_severe",
   "primary_metric": "f1",
-  "primary_split": "grouped",
-  "winner": "xgboost",
-  "winner_score": 0.6470588235294118,
-  "n_features": 35,
+  "primary_split": "temporal",
+  "winner": "logistic_regression",
+  "winner_validation_score": 0.664179104477612,
+  "n_features": 36,
   "feature_columns": [
     "cell_lat",
     "cell_lng",
@@ -24,9 +24,9 @@
     "avg_cloudcover_month",
     "rainy_days_share_month",
     "holidays_in_month",
-    "historical_peak_hour_share",
-    "historical_night_share",
-    "historical_motorcycle_share",
+    "historical_peak_hour_share_180d",
+    "historical_night_share_180d",
+    "historical_motorcycle_share_180d",
     "police_division_Bambalapitiya",
     "police_division_Borella",
     "police_division_Cinnamon Gardens",
@@ -42,158 +42,258 @@
     "police_division_Modera",
     "police_division_Narahenpita",
     "police_division_Slave Island",
-    "police_division_Wellawatte"
+    "police_division_Wellawatte",
+    "police_division_Unknown"
   ],
-  "splits": {
-    "temporal": {
-      "description": "Train: year_month <= 2023-08 (1580 rows). Test: year_month >= 2023-09 (316 rows). Evaluates 'predict future months for known cells'. Labels are computed only from training-window accidents (no future leakage).",
-      "n_train": 1580,
-      "n_test": 316,
-      "models": {
-        "logistic_regression": {
-          "accuracy": 0.7879746835443038,
-          "n_test": 316,
-          "test_class_distribution": {
-            "0": 212,
-            "1": 104
-          },
-          "precision": 0.6275862068965518,
-          "recall": 0.875,
-          "f1": 0.7309236947791165,
-          "roc_auc": 0.8676977503628447,
-          "confusion_matrix": [
-            [
-              158,
-              54
-            ],
-            [
-              13,
-              91
-            ]
-          ],
-          "tuned_threshold": 0.475
-        },
-        "random_forest": {
-          "accuracy": 0.9113924050632911,
-          "n_test": 316,
-          "test_class_distribution": {
-            "0": 212,
-            "1": 104
-          },
-          "precision": 0.7878787878787878,
-          "recall": 1.0,
-          "f1": 0.8813559322033898,
-          "roc_auc": 1.0,
-          "confusion_matrix": [
-            [
-              184,
-              28
-            ],
-            [
-              0,
-              104
-            ]
-          ],
-          "tuned_threshold": 0.325
-        },
-        "xgboost": {
-          "accuracy": 0.8354430379746836,
-          "n_test": 316,
-          "test_class_distribution": {
-            "0": 212,
-            "1": 104
-          },
-          "precision": 0.6666666666666666,
-          "recall": 1.0,
-          "f1": 0.8,
-          "roc_auc": 1.0,
-          "confusion_matrix": [
-            [
-              160,
-              52
-            ],
-            [
-              0,
-              104
-            ]
-          ],
-          "tuned_threshold": 0.25
-        }
-      }
+  "severity_training_definition": "Only severity_defined=true rows with a non-null severity target are used.",
+  "evaluation_rules": {
+    "temporal_test_period": "2023-09 through 2023-12",
+    "temporal_test_used_for_model_selection": false,
+    "temporal_test_used_for_threshold_selection": false,
+    "temporal_test_used_for_preprocessing_fit": false,
+    "temporal_test_used_for_xgboost_early_stopping": false,
+    "binary_threshold_selection": "pooled rolling validation only",
+    "xgboost_final_refit": "median best iteration from rolling validation folds",
+    "primary_scope": "future-month prediction for known cells",
+    "secondary_scope": "generalisation to held-out unseen cells"
+  },
+  "temporal_rolling_validation": {
+    "logistic_regression": {
+      "n_folds": 6,
+      "mean_precision": 0.48747568856264506,
+      "std_precision": 0.08671989304317593,
+      "mean_recall": 0.4338779312885235,
+      "std_recall": 0.2659264657449684,
+      "mean_f1": 0.42273638652421575,
+      "std_f1": 0.14832906549430863,
+      "mean_roc_auc": 0.478938430213579,
+      "std_roc_auc": 0.041445574588215385,
+      "mean_average_precision": 0.5092000809658965,
+      "std_average_precision": 0.061051208525586216,
+      "selection_metric": "pooled_rolling_validation_f1",
+      "pooled_f1": 0.664179104477612,
+      "pooled_precision": 0.498134328358209,
+      "pooled_recall": 0.996268656716418,
+      "pooled_roc_auc": 0.49811412252815346,
+      "pooled_average_precision": 0.500067760275221,
+      "selected_threshold": 0.18999999999999995,
+      "threshold_validation_f1": 0.664179104477612
     },
-    "grouped": {
-      "description": "Train: 47 cells (1128 rows). Test: 32 held-out cells (768 rows). Evaluates 'predict for unseen cells' (generalisation).",
-      "n_train": 1128,
-      "n_test": 768,
-      "models": {
-        "logistic_regression": {
-          "accuracy": 0.4518229166666667,
-          "n_test": 768,
-          "test_class_distribution": {
-            "0": 456,
-            "1": 312
-          },
-          "precision": 0.28627450980392155,
-          "recall": 0.23397435897435898,
-          "f1": 0.25749559082892415,
-          "roc_auc": 0.47533597615834455,
-          "confusion_matrix": [
-            [
-              274,
-              182
-            ],
-            [
-              239,
-              73
-            ]
-          ],
-          "tuned_threshold": 0.475
+    "random_forest": {
+      "n_folds": 6,
+      "mean_precision": 0.49172319386096025,
+      "std_precision": 0.038304410598437054,
+      "mean_recall": 1.0,
+      "std_recall": 0.0,
+      "mean_f1": 0.6583735143993896,
+      "std_f1": 0.034864163691397075,
+      "mean_roc_auc": 0.4965550622965648,
+      "std_roc_auc": 0.03627978826443067,
+      "mean_average_precision": 0.5096076966038324,
+      "std_average_precision": 0.041324904779321374,
+      "selection_metric": "pooled_rolling_validation_f1",
+      "pooled_f1": 0.6592865928659286,
+      "pooled_precision": 0.4917431192660551,
+      "pooled_recall": 1.0,
+      "pooled_roc_auc": 0.4830405733067514,
+      "pooled_average_precision": 0.49047069850720165,
+      "selected_threshold": 0.4999999999999998,
+      "threshold_validation_f1": 0.6592865928659286
+    },
+    "xgboost": {
+      "n_folds": 6,
+      "mean_precision": 0.49268104826709047,
+      "std_precision": 0.03842735258000719,
+      "mean_recall": 0.9883720930232558,
+      "std_recall": 0.026000790436044068,
+      "mean_f1": 0.6565181881538195,
+      "std_f1": 0.034942482285924004,
+      "mean_roc_auc": 0.5016265717297274,
+      "std_roc_auc": 0.057630730285184555,
+      "mean_average_precision": 0.5060908918702908,
+      "std_average_precision": 0.07640799233598035,
+      "selection_metric": "pooled_rolling_validation_f1",
+      "pooled_f1": 0.6600741656365884,
+      "pooled_precision": 0.49353049907578556,
+      "pooled_recall": 0.996268656716418,
+      "pooled_roc_auc": 0.508627889433698,
+      "pooled_average_precision": 0.504264353070793,
+      "selected_threshold": 0.47999999999999976,
+      "threshold_validation_f1": 0.6600741656365884
+    }
+  },
+  "temporal_test": {
+    "description": "Train: year_month <= 2023-08 (917 rows). Test: year_month >= 2023-09 (195 rows). Evaluates future-month prediction for known cells.",
+    "n_train": 917,
+    "n_test": 195,
+    "models": {
+      "logistic_regression": {
+        "accuracy": 0.5384615384615384,
+        "n_test": 195,
+        "test_class_distribution": {
+          "1": 105,
+          "0": 90
         },
-        "random_forest": {
-          "accuracy": 0.6197916666666666,
-          "n_test": 768,
-          "test_class_distribution": {
-            "0": 456,
-            "1": 312
-          },
-          "precision": 0.5204081632653061,
-          "recall": 0.8173076923076923,
-          "f1": 0.6359102244389028,
-          "roc_auc": 0.7066885964912282,
-          "confusion_matrix": [
-            [
-              221,
-              235
-            ],
-            [
-              57,
-              255
-            ]
+        "precision": 0.5384615384615384,
+        "recall": 1.0,
+        "f1": 0.7,
+        "roc_auc": 0.4434920634920635,
+        "average_precision": 0.4974262958350185,
+        "confusion_matrix": [
+          [
+            0,
+            90
           ],
-          "tuned_threshold": 0.2
+          [
+            0,
+            105
+          ]
+        ],
+        "tuned_threshold": 0.18999999999999995
+      },
+      "random_forest": {
+        "accuracy": 0.5384615384615384,
+        "n_test": 195,
+        "test_class_distribution": {
+          "1": 105,
+          "0": 90
         },
-        "xgboost": {
-          "accuracy": 0.625,
-          "n_test": 768,
+        "precision": 0.5384615384615384,
+        "recall": 1.0,
+        "f1": 0.7,
+        "roc_auc": 0.4675132275132275,
+        "average_precision": 0.5207727189739919,
+        "confusion_matrix": [
+          [
+            0,
+            90
+          ],
+          [
+            0,
+            105
+          ]
+        ],
+        "tuned_threshold": 0.4999999999999998
+      },
+      "xgboost": {
+        "accuracy": 0.5384615384615384,
+        "n_test": 195,
+        "test_class_distribution": {
+          "1": 105,
+          "0": 90
+        },
+        "precision": 0.5384615384615384,
+        "recall": 1.0,
+        "f1": 0.7,
+        "roc_auc": 0.4725396825396826,
+        "average_precision": 0.5365055175295643,
+        "confusion_matrix": [
+          [
+            0,
+            90
+          ],
+          [
+            0,
+            105
+          ]
+        ],
+        "tuned_threshold": 0.47999999999999976
+      }
+    }
+  },
+  "grouped_secondary": {
+    "description": "Train: 47 cells (689 rows). Test: 32 held-out cells (423 rows). Evaluates generalisation to unseen cells.",
+    "n_train": 689,
+    "n_test": 423,
+    "models": {
+      "logistic_regression": {
+        "validation": {
+          "threshold": 0.1,
+          "validation_f1": 0.6454545454545455
+        },
+        "metrics": {
+          "accuracy": 0.5106382978723404,
+          "n_test": 423,
           "test_class_distribution": {
-            "0": 456,
-            "1": 312
+            "1": 216,
+            "0": 207
           },
-          "precision": 0.5238095238095238,
-          "recall": 0.8461538461538461,
-          "f1": 0.6470588235294118,
-          "roc_auc": 0.7245838956365273,
+          "precision": 0.5106382978723404,
+          "recall": 1.0,
+          "f1": 0.676056338028169,
+          "roc_auc": 0.4495661120057255,
+          "average_precision": 0.48553898115989563,
           "confusion_matrix": [
             [
-              216,
-              240
+              0,
+              207
             ],
             [
-              48,
-              264
+              0,
+              216
             ]
           ],
-          "tuned_threshold": 0.15000000000000002
+          "tuned_threshold": 0.1
+        }
+      },
+      "random_forest": {
+        "validation": {
+          "threshold": 0.48999999999999977,
+          "validation_f1": 0.658008658008658
+        },
+        "metrics": {
+          "accuracy": 0.5106382978723404,
+          "n_test": 423,
+          "test_class_distribution": {
+            "1": 216,
+            "0": 207
+          },
+          "precision": 0.5106382978723404,
+          "recall": 1.0,
+          "f1": 0.676056338028169,
+          "roc_auc": 0.4601449275362318,
+          "average_precision": 0.5208439683534654,
+          "confusion_matrix": [
+            [
+              0,
+              207
+            ],
+            [
+              0,
+              216
+            ]
+          ],
+          "tuned_threshold": 0.48999999999999977
+        }
+      },
+      "xgboost": {
+        "validation": {
+          "threshold": 0.4999999999999998,
+          "validation_f1": 0.658008658008658
+        },
+        "metrics": {
+          "accuracy": 0.5106382978723404,
+          "n_test": 423,
+          "test_class_distribution": {
+            "1": 216,
+            "0": 207
+          },
+          "precision": 0.5106382978723404,
+          "recall": 1.0,
+          "f1": 0.676056338028169,
+          "roc_auc": 0.463018876364287,
+          "average_precision": 0.48945392542502375,
+          "confusion_matrix": [
+            [
+              0,
+              207
+            ],
+            [
+              0,
+              216
+            ]
+          ],
+          "tuned_threshold": 0.4999999999999998
         }
       }
     }
