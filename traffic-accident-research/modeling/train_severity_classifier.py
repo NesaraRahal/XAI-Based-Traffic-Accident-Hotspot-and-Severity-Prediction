@@ -1,53 +1,13 @@
-"""Task 2 — Severity classification (binary or 4-class).
+"""Leakage-safe severity classifier training.
 
-Predicts either:
-  - is_severe (binary: Fatal ∪ Serious vs Minor ∪ Damage-only), OR
-  - dominant_severity (4-class: Fatal / Serious / Minor / Damage-only)
-
-per (H3 cell, month) row in the panel. Which target is used is controlled
-by the SEVERITY_MODE constant below — flip it and rerun to get both sets
-of results side-by-side.
-
-Design rationale
-----------------
-Both modes are supported because:
-
-  * The 4-class version is what the framework originally promised and shows
-    that granular severity generalisation to unseen cells is limited by
-    data volume (Fatal=8 cells, Damage-only=3 cells) and by the absence
-    of infrastructure-level features (road geometry, speed limits) that
-    determine crash severity. This is a genuine scientific finding and is
-    reported honestly in the thesis.
-
-  * The binary version follows Al-Omari et al. (2025) in reformulating
-    severity as an operationally-meaningful Severe/Non-severe distinction
-    that aligns with police enforcement prioritisation and is learnable
-    from the current feature set.
-
-Both are reported in Chapter 4 as complementary evidence. The binary
-model is the one the dashboard uses at inference time; the 4-class result
-is a documented limitation.
-
-To run both:
-    # Set SEVERITY_MODE = "binary" → run once  → artifacts saved with mode suffix
-    # Set SEVERITY_MODE = "multiclass" → run   → artifacts saved with mode suffix
-
-Outputs (per mode):
-    models/severity_<mode>_logistic_regression.joblib
-    models/severity_<mode>_random_forest.joblib
-    models/severity_<mode>_xgboost.joblib
-    models/severity_<mode>_<winner>_winner.joblib
-    models/severity_<mode>_label_encoder.joblib   (multiclass only)
-    models/severity_<mode>_metrics_report.json
-    models/severity_<mode>_shap.joblib
+Modes: binary (is_severe) or multiclass (dominant_severity).
+Primary evaluation: temporal future-month prediction for known cells.
+Secondary evaluation: grouped held-out-cell generalisation.
 """
-
 from __future__ import annotations
-
-import logging
+import json, logging
 from pathlib import Path
-from typing import Dict, List
-
+from typing import Dict, List, Optional
 import joblib
 import numpy as np
 import pandas as pd
@@ -57,464 +17,308 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import XGBClassifier
-
 from modelling_utils import (
-    MODELS_DIR,
-    compute_metrics,
-    configure_logging,
-    encode_features,
-    grouped_split,
-    load_training_panel,
-    log_split_summary,
-    save_metrics_report,
-    save_model_artifacts,
-    save_shap_artifacts,
-    temporal_split,
+    MODELS_DIR, aggregate_validation_metrics, compute_metrics, configure_logging,
+    fit_feature_preprocessor, grouped_split, load_training_panel, log_split_summary,
+    make_internal_validation_split, make_rolling_temporal_validation_splits,
+    save_metrics_report, save_model_artifacts, save_shap_artifacts, temporal_split,
+    transform_features,
 )
+from modelling_utils import find_best_threshold
 
 LOGGER = logging.getLogger(__name__)
-
-# ══════════════════════════════════════════════════════════════════════════
-# Mode switch — set this to "binary" or "multiclass" and rerun
-# ══════════════════════════════════════════════════════════════════════════
-SEVERITY_MODE = "binary"   # "binary"  or  "multiclass"
-# ══════════════════════════════════════════════════════════════════════════
+SEVERITY_MODE = "multiclass"  # change to "multiclass" for the 4-class run
+MODEL_SEED = 42
+PRIMARY_SPLIT = "temporal"
+CLASS_ORDER = ["Fatal", "Serious", "Minor", "Damage-only"]
+MODEL_NAMES = ["logistic_regression", "random_forest", "xgboost"]
 
 if SEVERITY_MODE == "binary":
-    TASK = "severity_binary"
-    TARGET_COL = "is_severe"
-    PRIMARY_METRIC = "f1"
-    IS_BINARY = True
+    TASK, TARGET_COL, PRIMARY_METRIC, IS_BINARY = "severity_binary", "is_severe", "f1", True
 elif SEVERITY_MODE == "multiclass":
-    TASK = "severity_multiclass"
-    TARGET_COL = "dominant_severity"
-    PRIMARY_METRIC = "macro_f1"
-    IS_BINARY = False
+    TASK, TARGET_COL, PRIMARY_METRIC, IS_BINARY = "severity_multiclass", "dominant_severity", "macro_f1", False
 else:
-    raise ValueError(f"SEVERITY_MODE must be 'binary' or 'multiclass', got {SEVERITY_MODE}")
-
-PRIMARY_SPLIT = "grouped"
-MODEL_SEED = 42
-
-# 4-class ordering (only used when IS_BINARY=False)
-CLASS_ORDER = ["Fatal", "Serious", "Minor", "Damage-only"]
+    raise ValueError("SEVERITY_MODE must be 'binary' or 'multiclass'")
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# Model factories
-# ══════════════════════════════════════════════════════════════════════════
-
-def make_logistic_regression() -> LogisticRegression:
-    return LogisticRegression(
-        class_weight="balanced",
-        max_iter=3000,
-        random_state=MODEL_SEED,
-        solver="lbfgs" if not IS_BINARY else "liblinear",
-    )
+def make_lr():
+    return LogisticRegression(class_weight="balanced", max_iter=3000, random_state=MODEL_SEED,
+                              solver="liblinear" if IS_BINARY else "lbfgs")
 
 
-def make_random_forest() -> RandomForestClassifier:
-    # Same hyperparameter constraints as hotspot classifier — tuned via
-    # diagnostic plots to prevent per-tree memorisation on small data.
-    #
-    # AGGRESSIVE CLASS WEIGHTS (binary severity only):
-    # class_weight="balanced" alone was insufficient — the model still
-    # heavily biased toward predicting non-severe (recall on severe class
-    # was only ~31%). Manually up-weighting the severe class by a factor
-    # beyond "balanced" (which uses inverse frequency ≈ 2.04) pushes the
-    # decision boundary toward better severe-recall at the cost of some
-    # precision. F1 improves because recall was the limiting factor.
+def make_rf():
+    # Preserve the existing binary severity experiment; multiclass remains balanced.
+    weight = {0: 1.0, 1: 3.0} if IS_BINARY else "balanced"
+    return RandomForestClassifier(n_estimators=300, max_depth=8, min_samples_leaf=5,
+                                  max_features="sqrt", class_weight=weight,
+                                  random_state=MODEL_SEED, n_jobs=-1)
+
+
+def make_xgb_binary(y):
+    y = np.asarray(y).astype(int)
+    pos, neg = int(y.sum()), int(len(y) - y.sum())
+    ratio = neg / pos if pos else 1.0
+    return XGBClassifier(n_estimators=300, max_depth=5, learning_rate=.05,
+                         subsample=.8, colsample_bytree=.8,
+                         scale_pos_weight=ratio * 1.5, eval_metric="logloss",
+                         early_stopping_rounds=20, random_state=MODEL_SEED, n_jobs=-1)
+
+
+def make_xgb_multi():
+    return XGBClassifier(n_estimators=300, max_depth=5, learning_rate=.05,
+                         subsample=.8, colsample_bytree=.8, objective="multi:softprob",
+                         num_class=len(CLASS_ORDER), eval_metric="mlogloss",
+                         early_stopping_rounds=20, random_state=MODEL_SEED, n_jobs=-1)
+
+
+def xgb_final(n_estimators: int, y=None):
+    model = make_xgb_binary(y if y is not None else np.array([0, 1])) if IS_BINARY else make_xgb_multi()
+    params = model.get_params()
+    params["n_estimators"] = max(1, int(n_estimators))
+    params["early_stopping_rounds"] = None
+    return XGBClassifier(**params)
+
+
+def arr(y):
+    return y.to_numpy(dtype=int) if isinstance(y, pd.Series) else np.asarray(y, dtype=int)
+
+
+def multiclass_metrics(y_true, y_pred, encoder):
+    yt = encoder.inverse_transform(arr(y_true)); yp = encoder.inverse_transform(arr(y_pred))
+    return compute_metrics(yt, yp, task="multiclass", class_labels=CLASS_ORDER)
+
+
+def log_metrics(scope, name, m):
     if IS_BINARY:
-        class_weight = {0: 1.0, 1: 3.0}   # was "balanced"
-    else:
-        class_weight = "balanced"
-    return RandomForestClassifier(
-        n_estimators=300,
-        max_depth=8,
-        min_samples_leaf=5,
-        max_features="sqrt",
-        class_weight=class_weight,
-        random_state=MODEL_SEED,
-        n_jobs=-1,
-    )
-
-
-def make_xgboost_binary(y_train: np.ndarray) -> XGBClassifier:
-    """Binary XGBoost with scale_pos_weight for class imbalance + early stopping.
-
-    AGGRESSIVE CLASS WEIGHTING: standard scale_pos_weight = neg/pos gives
-    us the "balanced" starting point. We multiply by 1.5x to push the
-    boundary further toward better severe-recall, matching the RF override
-    above. Chosen because ROC-AUC of ~0.75 shows the model has real
-    discriminative signal — we just need to move the threshold effectively
-    via loss weighting.
-    """
-    pos_count = int(y_train.sum())
-    neg_count = int(len(y_train) - pos_count)
-    balanced_ratio = (neg_count / pos_count) if pos_count > 0 else 1.0
-    scale_pos_weight = balanced_ratio * 1.5   # was just balanced_ratio
-    return XGBClassifier(
-        n_estimators=300,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        scale_pos_weight=scale_pos_weight,
-        eval_metric="logloss",
-        early_stopping_rounds=20,
-        random_state=MODEL_SEED,
-        n_jobs=-1,
-    )
-
-
-def make_xgboost_multiclass() -> XGBClassifier:
-    """Multiclass XGBoost — sample_weight handled at fit time, early stopping enabled."""
-    return XGBClassifier(
-        n_estimators=300,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        objective="multi:softprob",
-        eval_metric="mlogloss",
-        early_stopping_rounds=20,
-        random_state=MODEL_SEED,
-        n_jobs=-1,
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Training + evaluation
-# ══════════════════════════════════════════════════════════════════════════
-
-def train_and_evaluate(
-    model_name: str,
-    X_train, y_train, X_test, y_test,
-    label_encoder,   # None for binary, LabelEncoder for multiclass
-    scale_features: bool,
-) -> Dict:
-    """Train one severity model on one split; return metrics dict + fitted model."""
-
-    scaler = None
-    X_train_used, X_test_used = X_train, X_test
-    if scale_features:
-        scaler = StandardScaler()
-        X_train_used = pd.DataFrame(
-            scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index
-        )
-        X_test_used = pd.DataFrame(
-            scaler.transform(X_test), columns=X_test.columns, index=X_test.index
-        )
-
-    if model_name == "logistic_regression":
-        model = make_logistic_regression()
-        model.fit(X_train_used, y_train)
-
-    elif model_name == "random_forest":
-        model = make_random_forest()
-        model.fit(X_train_used, y_train)
-
-    elif model_name == "xgboost":
-        if IS_BINARY:
-            y_train_arr = y_train.values if hasattr(y_train, "values") else y_train
-            model = make_xgboost_binary(y_train_arr)
-            model.fit(
-                X_train_used, y_train,
-                eval_set=[(X_test_used, y_test)],
-                verbose=False,
-            )
-        else:
-            model = make_xgboost_multiclass()
-            sample_weights = compute_sample_weight(class_weight="balanced", y=y_train)
-            model.fit(
-                X_train_used, y_train,
-                sample_weight=sample_weights,
-                eval_set=[(X_test_used, y_test)],
-                verbose=False,
-            )
-        LOGGER.info("[xgboost] early-stopping halted at round %d/%d (best iteration)",
-                    model.best_iteration + 1, model.n_estimators)
-    else:
-        raise ValueError(f"Unknown model_name: {model_name}")
-
-    # ── Prediction path differs for binary (threshold tuning) vs multiclass ─
-    if IS_BINARY:
-        # THRESHOLD TUNING: default cutoff 0.5 isn't always F1-optimal,
-        # especially with class-weighted training. We find the threshold
-        # that maximises F1 on TRAINING predictions (no test-set peek),
-        # then apply it to test. This is standard for imbalanced binary
-        # classification and does not use test information for model tuning.
-        y_train_proba = model.predict_proba(X_train_used)[:, 1] if hasattr(model, "predict_proba") else None
-        y_proba = model.predict_proba(X_test_used)[:, 1] if hasattr(model, "predict_proba") else None
-
-        threshold = 0.5
-        if y_train_proba is not None:
-            from sklearn.metrics import f1_score as _f1
-            best_f1, best_thr = -1.0, 0.5
-            y_train_arr = y_train.values if hasattr(y_train, "values") else y_train
-            for thr in np.linspace(0.1, 0.9, 33):
-                preds = (y_train_proba >= thr).astype(int)
-                f1 = _f1(y_train_arr, preds, zero_division=0)
-                if f1 > best_f1:
-                    best_f1, best_thr = f1, thr
-            threshold = best_thr
-            LOGGER.info("[%s] F1-optimal threshold on train = %.3f (train F1 at threshold = %.3f)",
-                        model_name, threshold, best_f1)
-
-        if y_proba is not None:
-            y_pred = (y_proba >= threshold).astype(int)
-        else:
-            y_pred = model.predict(X_test_used)
-
-        y_true = y_test.values if hasattr(y_test, "values") else y_test
-        metrics = compute_metrics(y_true, y_pred, y_proba, task="binary")
-        metrics["tuned_threshold"] = float(threshold)
-    else:
-        y_pred = model.predict(X_test_used)
-        # For multiclass: decode integer targets back to strings for the metrics report
-        y_pred_decoded = label_encoder.inverse_transform(y_pred)
-        y_test_decoded = label_encoder.inverse_transform(y_test)
-        present_classes = [c for c in CLASS_ORDER if c in label_encoder.classes_]
-        metrics = compute_metrics(
-            y_test_decoded, y_pred_decoded, y_proba=None,
-            task="multiclass", class_labels=present_classes,
-        )
-
-    return {
-        "model": model,
-        "scaler": scaler,
-        "metrics": metrics,
-        "tuned_threshold": metrics.get("tuned_threshold", 0.5),
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# SHAP on winner
-# ══════════════════════════════════════════════════════════════════════════
-
-def compute_shap_for_winner(
-    winner_name: str, winner_bundle: Dict,
-    X_train: pd.DataFrame, X_test: pd.DataFrame,
-    feature_columns: List[str],
-) -> None:
-    """Compute SHAP for the winning model. Works for both binary and multiclass —
-    multiclass SHAP returns per-class arrays; we save them all."""
-
-    model = winner_bundle["model"]
-    scaler = winner_bundle.get("scaler")
-
-    X_test_for_shap = X_test.copy()
-    if scaler is not None:
-        X_test_for_shap = pd.DataFrame(
-            scaler.transform(X_test),
-            columns=X_test.columns,
-            index=X_test.index,
-        )
-
-    LOGGER.info("Computing SHAP values for winner: %s (%s)",
-                winner_name, "binary" if IS_BINARY else "multiclass")
-
-    if winner_name in ("random_forest", "xgboost"):
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_test_for_shap)
-    else:
-        explainer = shap.LinearExplainer(model, X_test_for_shap)
-        shap_values = explainer.shap_values(X_test_for_shap)
-
-    save_shap_artifacts(
-        task=TASK,
-        explainer=explainer,
-        shap_values=shap_values,
-        feature_columns=feature_columns,
-        X_sample=X_test_for_shap,
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Main
-# ══════════════════════════════════════════════════════════════════════════
-
-def main() -> None:
-    configure_logging()
-    LOGGER.info("=== Severity Classifier Training Start (mode=%s) ===", SEVERITY_MODE)
-
-    # Step 1 — Load panel
-    panel = load_training_panel()
-
-    before = len(panel)
-    panel = panel.dropna(subset=[TARGET_COL])
-    after = len(panel)
-    if after < before:
-        LOGGER.warning("Dropped %d rows with missing %s", before - after, TARGET_COL)
-
-    # Step 2 — Encode features
-    X, feature_columns = encode_features(panel, fit_encoder=True)
-    LOGGER.info("Feature matrix shape: %s | %d features", X.shape, len(feature_columns))
-
-    # Step 2b — Encode targets according to mode
-    if IS_BINARY:
-        # is_severe is already boolean → convert to int for models
-        y_encoded = panel[TARGET_COL].astype(int)
-        label_encoder = None
-        LOGGER.info("Binary target [%s] distribution (per-row):", TARGET_COL)
-        LOGGER.info("%s", y_encoded.value_counts().to_dict())
-        LOGGER.info("Binary target (per-cell view):")
-        LOGGER.info("%s",
-                    panel.drop_duplicates("h3_cell")[TARGET_COL]
-                    .value_counts().to_dict())
-    else:
-        label_encoder = LabelEncoder()
-        label_encoder.fit(panel[TARGET_COL])
-        y_encoded = pd.Series(label_encoder.transform(panel[TARGET_COL]),
-                              index=panel.index)
-        LOGGER.info("Label classes (encoded order): %s", list(label_encoder.classes_))
-        LOGGER.info("Multiclass target (per-cell view):")
-        LOGGER.info("%s",
-                    panel.drop_duplicates("h3_cell")[TARGET_COL]
-                    .value_counts().to_dict())
-
-    # Step 3 — Both splits
-    splits = [temporal_split(panel), grouped_split(panel)]
-    for split in splits:
-        log_split_summary(split, panel, TARGET_COL)
-
-    # Step 4 — Train all 3 models on both splits
-    model_names = ["logistic_regression", "random_forest", "xgboost"]
-    results: Dict[str, Dict[str, Dict]] = {}
-
-    for split in splits:
-        results[split.name] = {}
-        X_train, X_test = X.iloc[split.train_idx], X.iloc[split.test_idx]
-        y_train, y_test = y_encoded.iloc[split.train_idx], y_encoded.iloc[split.test_idx]
-
-        # Missing-class warning (multiclass only)
-        if not IS_BINARY:
-            test_labels_present = np.unique(label_encoder.inverse_transform(y_test))
-            missing = set(label_encoder.classes_) - set(test_labels_present)
-            if missing:
-                LOGGER.warning(
-                    "[%s split] test classes present: %s. Missing: %s. "
-                    "Macro-F1 will be affected for missing classes.",
-                    split.name, list(test_labels_present), sorted(missing),
-                )
-
-        for model_name in model_names:
-            LOGGER.info("[%s / %s] training...", split.name, model_name)
-            scale = (model_name == "logistic_regression")
-            bundle = train_and_evaluate(
-                model_name, X_train, y_train, X_test, y_test,
-                label_encoder=label_encoder, scale_features=scale,
-            )
-            results[split.name][model_name] = bundle
-            m = bundle["metrics"]
-            if IS_BINARY:
-                LOGGER.info(
-                    "[%s / %s] acc=%.3f | precision=%.3f | recall=%.3f | f1=%.3f | roc_auc=%s",
-                    split.name, model_name,
+        LOGGER.info("[%s/%s] acc=%.3f p=%.3f r=%.3f f1=%.3f roc_auc=%s AP=%s", scope, name,
                     m["accuracy"], m["precision"], m["recall"], m["f1"],
-                    f"{m['roc_auc']:.3f}" if m.get("roc_auc") is not None else "n/a",
-                )
+                    "%.3f" % m["roc_auc"] if m.get("roc_auc") is not None else "n/a",
+                    "%.3f" % m["average_precision"] if m.get("average_precision") is not None else "n/a")
+    else:
+        LOGGER.info("[%s/%s] acc=%.3f macro_p=%.3f macro_r=%.3f macro_f1=%.3f", scope, name,
+                    m["accuracy"], m["macro_precision"], m["macro_recall"], m["macro_f1"])
+        LOGGER.info("[%s/%s] per_class_f1=%s", scope, name,
+                    {k: round(v, 3) for k, v in m.get("per_class_f1", {}).items()})
+
+
+def fit_model(name, Xtr, ytr, Xval=None, yval=None, final_n=None):
+    scaler = None
+    Xtr_u, Xval_u = Xtr, Xval
+    if name == "logistic_regression":
+        scaler = StandardScaler()
+        Xtr_u = pd.DataFrame(scaler.fit_transform(Xtr), columns=Xtr.columns, index=Xtr.index)
+        if Xval is not None:
+            Xval_u = pd.DataFrame(scaler.transform(Xval), columns=Xval.columns, index=Xval.index)
+    if name == "logistic_regression":
+        model = make_lr(); model.fit(Xtr_u, ytr)
+    elif name == "random_forest":
+        model = make_rf(); model.fit(Xtr_u, ytr)
+    elif name == "xgboost":
+        if final_n is not None:
+            model = xgb_final(final_n, arr(ytr) if IS_BINARY else None)
+            if IS_BINARY:
+                model.fit(Xtr_u, ytr, verbose=False)
             else:
-                LOGGER.info(
-                    "[%s / %s] acc=%.3f | macro_p=%.3f | macro_r=%.3f | macro_f1=%.3f",
-                    split.name, model_name,
-                    m["accuracy"], m["macro_precision"],
-                    m["macro_recall"], m["macro_f1"],
-                )
-                if "per_class_f1" in m:
-                    LOGGER.info("[%s / %s] per_class_f1: %s",
-                                split.name, model_name,
-                                {k: round(v, 3) for k, v in m["per_class_f1"].items()})
+                model.fit(Xtr_u, ytr, sample_weight=compute_sample_weight("balanced", ytr), verbose=False)
+        else:
+            model = make_xgb_binary(arr(ytr)) if IS_BINARY else make_xgb_multi()
+            kwargs = {"eval_set": [(Xval_u, yval)], "verbose": False}
+            if not IS_BINARY: kwargs["sample_weight"] = compute_sample_weight("balanced", ytr)
+            model.fit(Xtr_u, ytr, **kwargs)
+    else:
+        raise ValueError(name)
+    return model, scaler
 
-    # Step 5 — Save all trained models (from primary split fits)
-    for model_name in model_names:
-        bundle = results[PRIMARY_SPLIT][model_name]
-        save_model_artifacts(TASK, model_name, bundle["model"], feature_columns)
 
-    # Step 6 — Pick winner by primary metric on primary split
-    scores = {
-        name: results[PRIMARY_SPLIT][name]["metrics"][PRIMARY_METRIC]
-        for name in model_names
-    }
-    winner_name = max(scores, key=scores.get)
-    winner_bundle = results[PRIMARY_SPLIT][winner_name]
-    LOGGER.info(
-        "Winner (by %s on %s split): %s (score=%.3f)",
-        PRIMARY_METRIC, PRIMARY_SPLIT, winner_name, scores[winner_name],
-    )
-    LOGGER.info("All models on %s split by %s: %s",
-                PRIMARY_SPLIT, PRIMARY_METRIC,
-                {k: round(v, 3) for k, v in scores.items()})
+def rolling_validation(panel, split, y, encoder):
+    folds = make_rolling_temporal_validation_splits(panel, split)
+    fold_metrics = {n: [] for n in MODEL_NAMES}
+    pooled_y, pooled_p = {n: [] for n in MODEL_NAMES}, {n: [] for n in MODEL_NAMES}
+    best_iters = {n: [] for n in MODEL_NAMES}
 
-    save_model_artifacts(
-        TASK, winner_name, winner_bundle["model"], feature_columns, is_winner=True,
-    )
+    for i, (fit_idx, val_idx) in enumerate(folds, 1):
+        fit_panel, val_panel = panel.loc[fit_idx], panel.loc[val_idx]
+        prep = fit_feature_preprocessor(fit_panel)
+        Xtr, Xv = transform_features(fit_panel, prep), transform_features(val_panel, prep)
+        ytr, yv = y.loc[fit_idx], y.loc[val_idx]
+        LOGGER.info("Rolling severity fold %d/%d: fit=%d validation=%d", i, len(folds), len(fit_idx), len(val_idx))
+        for name in MODEL_NAMES:
+            model, scaler = fit_model(name, Xtr, ytr, Xv, yv)
+            Xv_u = scaler.transform(Xv) if scaler is not None else Xv
+            if scaler is not None: Xv_u = pd.DataFrame(Xv_u, columns=Xv.columns, index=Xv.index)
+            if name == "xgboost": best_iters[name].append(int(model.best_iteration) + 1)
+            if IS_BINARY:
+                p = model.predict_proba(Xv_u)[:, 1]
+                yt = arr(yv); pred = (p >= .5).astype(int)
+                m = compute_metrics(yt, pred, p, task="binary")
+                pooled_y[name].append(yt); pooled_p[name].append(p)
+            else:
+                pred = model.predict(Xv_u); m = multiclass_metrics(yv, pred, encoder)
+            fold_metrics[name].append(m)
+            LOGGER.info("[rolling %d/%s] %s=%.4f", i, name, PRIMARY_METRIC, m[PRIMARY_METRIC])
 
-    # Step 6a — Save the tuned threshold alongside the winner (binary only).
-    # The dashboard/inference layer must apply this threshold to probability
-    # predictions instead of the default 0.5, or F1 will regress.
+    summary, thresholds = {}, {}
+    for name in MODEL_NAMES:
+        if IS_BINARY:
+            yt = np.concatenate(pooled_y[name]); p = np.concatenate(pooled_p[name])
+            t = find_best_threshold(yt, p)
+            pred = (p >= t["threshold"]).astype(int)
+            pm = compute_metrics(yt, pred, p, task="binary")
+            summary[name] = aggregate_validation_metrics(fold_metrics[name])
+            summary[name].update({"selection_metric": "pooled_rolling_validation_f1",
+                                  "pooled_f1": pm["f1"], "pooled_precision": pm["precision"],
+                                  "pooled_recall": pm["recall"], "pooled_roc_auc": pm["roc_auc"],
+                                  "pooled_average_precision": pm["average_precision"],
+                                  "selected_threshold": t["threshold"],
+                                  "threshold_validation_f1": t["f1"]})
+            thresholds[name] = float(t["threshold"])
+        else:
+            vals = [m["macro_f1"] for m in fold_metrics[name]]
+            summary[name] = {"n_folds": len(vals), "mean_macro_f1": float(np.mean(vals)),
+                             "std_macro_f1": float(np.std(vals)),
+                             "selection_metric": "mean_rolling_validation_macro_f1",
+                             "selection_score": float(np.mean(vals))}
+            thresholds[name] = None
+    medians = {n: (int(round(np.median(best_iters[n]))) if best_iters[n] else None) for n in MODEL_NAMES}
+    return summary, thresholds, medians
+
+
+def final_temporal(name, panel, split, y, encoder, threshold, n_estimators):
+    tr_idx, te_idx = np.asarray(split.train_idx), np.asarray(split.test_idx)
+    trp, tep = panel.loc[tr_idx], panel.loc[te_idx]
+    prep = fit_feature_preprocessor(trp)
+    Xtr, Xte = transform_features(trp, prep), transform_features(tep, prep)
+    model, scaler = fit_model(name, Xtr, y.loc[tr_idx], final_n=n_estimators if name == "xgboost" else None)
+    Xte_u = Xte
+    if scaler is not None:
+        Xte_u = pd.DataFrame(scaler.transform(Xte), columns=Xte.columns, index=Xte.index)
+    yte = y.loc[te_idx]
     if IS_BINARY:
-        threshold_path = MODELS_DIR / f"{TASK}_winner_threshold.joblib"
-        joblib.dump(
-            {
-                "tuned_threshold": winner_bundle["tuned_threshold"],
-                "winner_model": winner_name,
-            },
-            threshold_path,
-        )
-        LOGGER.info("Saved tuned threshold: %s (threshold=%.3f)",
-                    threshold_path, winner_bundle["tuned_threshold"])
+        p = model.predict_proba(Xte_u)[:, 1]
+        threshold = .5 if threshold is None else float(threshold)
+        pred = (p >= threshold).astype(int)
+        m = compute_metrics(arr(yte), pred, p, task="binary"); m["tuned_threshold"] = threshold
+    else:
+        pred = model.predict(Xte_u); m = multiclass_metrics(yte, pred, encoder)
+    return {"model": model, "scaler": scaler, "preprocessor": prep, "metrics": m,
+            "threshold": threshold, "X_test": Xte, "X_train": Xtr}
 
-    # Step 6b — Save label encoder (multiclass only)
-    if not IS_BINARY:
-        encoder_path = MODELS_DIR / f"{TASK}_label_encoder.joblib"
-        joblib.dump(
-            {"label_encoder": label_encoder, "class_order": CLASS_ORDER},
-            encoder_path,
-        )
-        LOGGER.info("Saved severity label encoder: %s", encoder_path)
 
-    # Step 7 — Save metrics report
+def grouped_secondary(panel, split, y, encoder):
+    fit_idx, val_idx = make_internal_validation_split(panel, split)
+    fitp, valp = panel.loc[fit_idx], panel.loc[val_idx]
+    prep_val = fit_feature_preprocessor(fitp)
+    Xf, Xv = transform_features(fitp, prep_val), transform_features(valp, prep_val)
+    yf, yv = y.loc[fit_idx], y.loc[val_idx]
+    info, iters = {}, {}
+    for name in MODEL_NAMES:
+        model, scaler = fit_model(name, Xf, yf, Xv, yv)
+        Xv_u = Xv if scaler is None else pd.DataFrame(scaler.transform(Xv), columns=Xv.columns, index=Xv.index)
+        if name == "xgboost": iters[name] = int(model.best_iteration) + 1
+        if IS_BINARY:
+            p = model.predict_proba(Xv_u)[:, 1]; t = find_best_threshold(arr(yv), p)
+            info[name] = {"threshold": t["threshold"], "validation_f1": t["f1"]}
+        else:
+            info[name] = {"validation_macro_f1": multiclass_metrics(yv, model.predict(Xv_u), encoder)["macro_f1"]}
+    # Refit on all grouped training cells; test cells never enter preprocessing.
+    tr_idx, te_idx = np.asarray(split.train_idx), np.asarray(split.test_idx)
+    prep = fit_feature_preprocessor(panel.loc[tr_idx])
+    Xtr = transform_features(panel.loc[tr_idx], prep); Xte = transform_features(panel.loc[te_idx], prep)
+    results = {}
+    for name in MODEL_NAMES:
+        model, scaler = fit_model(name, Xtr, y.loc[tr_idx], final_n=iters.get(name) if name == "xgboost" else None)
+        Xte_u = Xte if scaler is None else pd.DataFrame(scaler.transform(Xte), columns=Xte.columns, index=Xte.index)
+        if IS_BINARY:
+            p = model.predict_proba(Xte_u)[:, 1]; t = info[name]["threshold"]; pred = (p >= t).astype(int)
+            m = compute_metrics(arr(y.loc[te_idx]), pred, p, task="binary"); m["tuned_threshold"] = t
+        else:
+            m = multiclass_metrics(y.loc[te_idx], model.predict(Xte_u), encoder)
+        results[name] = {"validation": info[name], "metrics": m}
+    return results
+
+
+def shap_winner(bundle, name, feature_columns):
+    X = bundle["X_test"]
+    if bundle["scaler"] is not None:
+        X = pd.DataFrame(bundle["scaler"].transform(X), columns=X.columns, index=X.index)
+    explainer = shap.TreeExplainer(bundle["model"]) if name in ("random_forest", "xgboost") else shap.LinearExplainer(bundle["model"], X)
+    values = explainer.shap_values(X)
+    save_shap_artifacts(TASK, explainer, values, feature_columns, X)
+
+
+def main():
+    configure_logging()
+    LOGGER.info("=== Severity training start: mode=%s ===", SEVERITY_MODE)
+    panel = load_training_panel()
+    if "severity_defined" in panel.columns:
+        before = len(panel)
+        panel = panel[panel["severity_defined"].astype(bool)].copy()
+        LOGGER.info("Retained %d/%d severity-defined rows", len(panel), before)
+    panel = panel.dropna(subset=[TARGET_COL]).sort_values(["year_month", "h3_cell"]).reset_index(drop=True)
+    if panel.empty: raise ValueError("No severity-defined rows remain.")
+
+    if IS_BINARY:
+        y, encoder = panel[TARGET_COL].astype(int), None
+    else:
+        encoder = LabelEncoder(); y = pd.Series(encoder.fit_transform(panel[TARGET_COL].astype(str)), index=panel.index)
+        LOGGER.info("Multiclass encoder classes: %s", list(encoder.classes_))
+
+    temporal, grouped = temporal_split(panel), grouped_split(panel)
+    log_split_summary(temporal, panel, TARGET_COL); log_split_summary(grouped, panel, TARGET_COL)
+
+    validation, thresholds, medians = rolling_validation(panel, temporal, y, encoder)
+    scores = {n: validation[n]["pooled_f1"] if IS_BINARY else validation[n]["selection_score"] for n in MODEL_NAMES}
+    winner = max(scores, key=scores.get)
+    LOGGER.info("PRIMARY WINNER: %s | validation score=%.4f", winner, scores[winner])
+
+    temporal_results = {}
+    for name in MODEL_NAMES:
+        temporal_results[name] = final_temporal(name, panel, temporal, y, encoder, thresholds[name], medians[name])
+        log_metrics("temporal_test", name, temporal_results[name]["metrics"])
+
+    grouped_results = grouped_secondary(panel, grouped, y, encoder)
+    for name in MODEL_NAMES: log_metrics("grouped_test", name, grouped_results[name]["metrics"])
+
+    feature_columns = temporal_results[winner]["preprocessor"].feature_columns
+    for name in MODEL_NAMES:
+        b = temporal_results[name]
+        save_model_artifacts(TASK, name, b["model"], feature_columns, scaler=b["scaler"], threshold=b["threshold"], preprocessor=b["preprocessor"])
+    wb = temporal_results[winner]
+    save_model_artifacts(TASK, winner, wb["model"], feature_columns, scaler=wb["scaler"], threshold=wb["threshold"], preprocessor=wb["preprocessor"], is_winner=True)
+
+    if IS_BINARY:
+        joblib.dump({"tuned_threshold": wb["threshold"], "winner_model": winner,
+                     "selection": "pooled_rolling_temporal_validation"}, MODELS_DIR / f"{TASK}_winner_threshold.joblib")
+    else:
+        joblib.dump({"label_encoder": encoder, "class_order": CLASS_ORDER}, MODELS_DIR / f"{TASK}_label_encoder.joblib")
+
     report = {
-        "task": TASK,
-        "mode": SEVERITY_MODE,
-        "target": TARGET_COL,
-        "primary_metric": PRIMARY_METRIC,
-        "primary_split": PRIMARY_SPLIT,
-        "winner": winner_name,
-        "winner_score": scores[winner_name],
-        "n_features": len(feature_columns),
-        "feature_columns": feature_columns,
-        "splits": {
-            split.name: {
-                "description": split.description,
-                "n_train": len(split.train_idx),
-                "n_test": len(split.test_idx),
-                "models": {
-                    name: results[split.name][name]["metrics"]
-                    for name in model_names
-                },
-            }
-            for split in splits
+        "task": TASK, "mode": SEVERITY_MODE, "target": TARGET_COL,
+        "primary_metric": PRIMARY_METRIC, "primary_split": PRIMARY_SPLIT,
+        "winner": winner, "winner_validation_score": float(scores[winner]),
+        "n_features": len(feature_columns), "feature_columns": feature_columns,
+        "severity_training_definition": "Only severity_defined=true rows with a non-null severity target are used.",
+        "evaluation_rules": {
+            "temporal_test_period": "2023-09 through 2023-12",
+            "temporal_test_used_for_model_selection": False,
+            "temporal_test_used_for_threshold_selection": False,
+            "temporal_test_used_for_preprocessing_fit": False,
+            "temporal_test_used_for_xgboost_early_stopping": False,
+            "binary_threshold_selection": "pooled rolling validation only" if IS_BINARY else None,
+            "xgboost_final_refit": "median best iteration from rolling validation folds",
+            "primary_scope": "future-month prediction for known cells",
+            "secondary_scope": "generalisation to held-out unseen cells",
         },
+        "temporal_rolling_validation": validation,
+        "temporal_test": {"description": temporal.description, "n_train": len(temporal.train_idx), "n_test": len(temporal.test_idx),
+                          "models": {n: temporal_results[n]["metrics"] for n in MODEL_NAMES}},
+        "grouped_secondary": {"description": grouped.description, "n_train": len(grouped.train_idx), "n_test": len(grouped.test_idx),
+                              "models": grouped_results},
     }
-    if not IS_BINARY:
-        report["class_order"] = CLASS_ORDER
-        report["label_classes_present"] = list(label_encoder.classes_)
+    if not IS_BINARY: report.update({"class_order": CLASS_ORDER, "label_classes_present": list(encoder.classes_)})
     save_metrics_report(TASK, report)
-
-    # Step 8 — SHAP on winner
-    winner_split = splits[0]  # temporal (first) — we save SHAP against grouped test below
-    # Actually we want SHAP on the primary (grouped) split, which is splits[1].
-    primary_split_obj = next(s for s in splits if s.name == PRIMARY_SPLIT)
-    X_train_win = X.iloc[primary_split_obj.train_idx]
-    X_test_win = X.iloc[primary_split_obj.test_idx]
-    compute_shap_for_winner(
-        winner_name, winner_bundle, X_train_win, X_test_win, feature_columns,
-    )
-
-    LOGGER.info("=== Severity Classifier Training Complete (mode=%s) ===", SEVERITY_MODE)
+    shap_winner(wb, winner, feature_columns)
+    LOGGER.info("=== Severity training complete: %s | temporal test %s=%.4f ===", winner, PRIMARY_METRIC, wb["metrics"][PRIMARY_METRIC])
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
